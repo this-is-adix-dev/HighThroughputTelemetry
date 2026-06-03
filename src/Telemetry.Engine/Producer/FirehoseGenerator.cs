@@ -65,8 +65,16 @@ public sealed class FirehoseGenerator
 
                 if (deficit < _batchSize)
                 {
-                    // Ahead of schedule — yield briefly rather than busy-spin a core.
-                    await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+                    // Ahead of schedule. The naive move here is `await Task.Delay(1, …)`,
+                    // but the .NET timer queue can't resolve 1 ms on stock Windows — it
+                    // rounds up to a ~15.6 ms tick, so the producer oversleeps and then
+                    // emits a jittery burst to catch up. Instead we wait *precisely* until
+                    // the next full batch is genuinely owed, which at 100k/sec is on the
+                    // order of milliseconds. PreciseDelay sleeps coarsely for the bulk and
+                    // spin-waits only the sub-tick tail, so pacing stays smooth.
+                    double readingsUntilBatchDue = _batchSize - deficit;
+                    TimeSpan untilDue = TimeSpan.FromSeconds(readingsUntilBatchDue / _targetReadingsPerSecond);
+                    await PreciseDelay.WaitAsync(untilDue, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
 
