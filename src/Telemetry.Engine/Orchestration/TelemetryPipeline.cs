@@ -82,17 +82,41 @@ public sealed class TelemetryPipeline
         // System.Diagnostics.Metrics pipeline. Program.cs attaches a MeterListener
         // (ConsoleMetricsExporter) that streams the throughput summary every second.
 
-        // --- Shutdown sequence ---
-        // 1. Producer returns once the duration elapses; on its way out it completes
-        //    the channel writer, which is what lets the consumers below terminate.
-        await producerTask.ConfigureAwait(false);
+        // --- Fast-fail shutdown ---
+        // Collect every pipeline stage into a single set so we can race them.
+        // If *any* task faults, we cancel the shared token immediately so the
+        // surviving stages unwind quickly instead of hanging on channel I/O.
+        var allTasks = new HashSet<Task>(consumerTasks) { producerTask, sinkTask };
 
-        // 2. Consumers drain whatever is still queued, then finish.
-        await Task.WhenAll(consumerTasks).ConfigureAwait(false);
+        while (allTasks.Count > 0)
+        {
+            Task finished = await Task.WhenAny(allTasks).ConfigureAwait(false);
+            allTasks.Remove(finished);
 
-        // 3. The sink observes the same token and winds down; it also performs its
-        //    final flush internally so the last window of data is never lost.
-        await sinkTask.ConfigureAwait(false);
+            if (finished.IsFaulted)
+            {
+                // Signal every other stage to stop, then await them so nothing
+                // is left dangling.  After that, re-throw the original failure.
+                await lifetime.CancelAsync().ConfigureAwait(false);
+                // Complete the channel so consumers unblock from ReadAllAsync.
+                channel.Writer.TryComplete(finished.Exception);
+
+                try
+                {
+                    await Task.WhenAll(allTasks).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Expected: surviving tasks will throw OperationCanceledException
+                    // or ChannelClosedException once we cancelled them.  We only care
+                    // about the *original* fault that triggered the teardown.
+                }
+
+                // Propagate — this surfaces the original exception with its
+                // full stack trace rather than a wrapped AggregateException.
+                await finished.ConfigureAwait(false);
+            }
+        }
 
         wallClock.Stop();
 
