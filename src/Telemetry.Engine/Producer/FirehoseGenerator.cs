@@ -89,14 +89,27 @@ public sealed class FirehoseGenerator
                 }
 
                 TelemetryBatch batch = BuildBatch(random);
-                await _writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
-                TotalProduced += batch.ReadingCount;
+                bool handedOff = false;
+                try
+                {
+                    await _writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                    handedOff = true;
 
-                // Record AFTER the handoff so the counter reflects readings that
-                // actually entered the pipeline (back-pressure may have parked us
-                // above). The tag-less Add(long) overload boxes nothing and rents no
-                // tag array — this is a heap-free increment on the producer hot path.
-                _metrics.ReadingsProduced.Add(batch.ReadingCount);
+                    TotalProduced += batch.ReadingCount;
+
+                    // Record AFTER the handoff so the counter reflects readings that
+                    // actually entered the pipeline (back-pressure may have parked us
+                    // above). The tag-less Add(long) overload boxes nothing and rents no
+                    // tag array — this is a heap-free increment on the producer hot path.
+                    _metrics.ReadingsProduced.Add(batch.ReadingCount);
+                }
+                finally
+                {
+                    if (!handedOff)
+                    {
+                        batch.Return();
+                    }
+                }
             }
         }
         catch (OperationCanceledException)
