@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Threading.Channels;
 using Telemetry.Engine.Aggregation;
+using Telemetry.Engine.Observability;
 using Telemetry.Engine.Producer;
 using Telemetry.Engine.Sink;
 
@@ -34,11 +35,19 @@ public sealed class TelemetryPipeline
             SingleReader = false,
         });
 
+        // One metrics instance owns the Meter for this run. Disposing it at the end
+        // unpublishes the instruments and detaches any live MeterListener. It is
+        // shared (not static) so it stays unit-testable and matches the pipeline's
+        // constructor-injection style; the console exporter still finds the meter by
+        // name, so the two sides remain decoupled.
+        using var metrics = new EngineMetrics();
+
         var aggregator = new SensorAggregator();
         var database = new DummySlowDatabase();
         var sink = new AsyncDataSink(aggregator, database, _options.FlushInterval, _options.SinkShardCount);
         var producer = new FirehoseGenerator(
             channel.Writer,
+            metrics,
             _options.TargetReadingsPerSecond,
             _options.BatchSize,
             _options.SensorCount);
@@ -56,10 +65,13 @@ public sealed class TelemetryPipeline
 
         var consumerTasks = new Task[_options.ConsumerCount];
         for (int i = 0; i < consumerTasks.Length; i++)
-            consumerTasks[i] = ConsumeAsync(channel.Reader, aggregator);
+            consumerTasks[i] = ConsumeAsync(channel.Reader, aggregator, metrics);
 
         Task sinkTask = sink.RunAsync(token);
-        Task reporterTask = ReportAsync(aggregator, token);
+
+        // Live reporting is no longer wired here: it now flows through the standard
+        // System.Diagnostics.Metrics pipeline. Program.cs attaches a MeterListener
+        // (ConsoleMetricsExporter) that streams the throughput summary every second.
 
         // --- Shutdown sequence ---
         // 1. Producer returns once the duration elapses; on its way out it completes
@@ -69,10 +81,9 @@ public sealed class TelemetryPipeline
         // 2. Consumers drain whatever is still queued, then finish.
         await Task.WhenAll(consumerTasks).ConfigureAwait(false);
 
-        // 3. Sink and reporter observe the same token and wind down; the sink also
-        //    performs its final flush internally.
+        // 3. The sink observes the same token and winds down; it also performs its
+        //    final flush internally so the last window of data is never lost.
         await sinkTask.ConfigureAwait(false);
-        await reporterTask.ConfigureAwait(false);
 
         wallClock.Stop();
 
@@ -87,9 +98,13 @@ public sealed class TelemetryPipeline
 
     /// <summary>
     /// One consumer worker: drain batches, decode each with the zero-allocation
-    /// parser via the aggregator, and always return the pooled buffer.
+    /// parser via the aggregator, record observability, and always return the pooled
+    /// buffer.
     /// </summary>
-    private static async Task ConsumeAsync(ChannelReader<TelemetryBatch> reader, SensorAggregator aggregator)
+    private static async Task ConsumeAsync(
+        ChannelReader<TelemetryBatch> reader,
+        SensorAggregator aggregator,
+        EngineMetrics metrics)
     {
         // ReadAllAsync (no token) drains until the writer is completed, so in-flight
         // batches are never dropped on shutdown. The await yields the thread while
@@ -98,41 +113,22 @@ public sealed class TelemetryPipeline
         {
             try
             {
-                aggregator.IngestBatch(batch.Span);
+                // IngestBatch is where TelemetryParser and SensorStatistics run; its
+                // return value is the count of readings successfully parsed and folded
+                // in — exactly the "consumed" figure and this batch's processed size.
+                int ingested = aggregator.IngestBatch(batch.Span);
+
+                // Two tag-less recordings. Add(long)/Record(int) take the value by
+                // value, so there is no boxing and no tag array — zero heap traffic on
+                // the consumer hot path, which is what keeps GC flat at 100k/sec.
+                metrics.ReadingsConsumed.Add(ingested);
+                metrics.BatchSize.Record(ingested);
             }
             finally
             {
                 // Critical: hand the rented array back so steady-state GC stays flat.
                 batch.Return();
             }
-        }
-    }
-
-    /// <summary>Prints a live throughput line roughly once per second.</summary>
-    private async Task ReportAsync(SensorAggregator aggregator, CancellationToken token)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-        long previousProcessed = 0;
-        var sw = Stopwatch.StartNew();
-
-        try
-        {
-            while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
-            {
-                long processed = aggregator.TotalProcessed;
-                long delta = processed - previousProcessed;
-                previousProcessed = processed;
-
-                Console.WriteLine(
-                    $"[{sw.Elapsed.TotalSeconds,5:F1}s] " +
-                    $"throughput: {delta,8:N0} readings/s | " +
-                    $"total: {processed,10:N0} | " +
-                    $"sensors: {aggregator.SensorCount,3}");
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected at end-of-run.
         }
     }
 }

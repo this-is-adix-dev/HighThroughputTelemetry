@@ -1,4 +1,5 @@
 using System.Globalization;
+using Telemetry.Engine.Observability;
 using Telemetry.Engine.Orchestration;
 
 // Top-level statements keep the entry point minimal: all real wiring lives in
@@ -20,8 +21,26 @@ Console.CancelKeyPress += (_, eventArgs) =>
     cts.Cancel();
 };
 
-var pipeline = new TelemetryPipeline(new PipelineOptions());
-PipelineReport report = await pipeline.RunAsync(cts.Token);
+// --- Native, AOT-friendly observability ---
+// ConsoleMetricsExporter attaches a System.Diagnostics.Metrics.MeterListener to the
+// engine's Meter (matched by name) and streams a live throughput summary to the
+// console once per second. Live telemetry now flows through the standard metrics
+// pipeline instead of a hand-rolled reporter — no external OpenTelemetry packages,
+// and nothing reflection-based that would compromise Native AOT.
+var metricsExporter = new ConsoleMetricsExporter();
+metricsExporter.Start();
+
+PipelineReport report;
+try
+{
+    var pipeline = new TelemetryPipeline(new PipelineOptions());
+    report = await pipeline.RunAsync(cts.Token);
+}
+finally
+{
+    // Stop the live reporter before the final summary so their output never interleaves.
+    await metricsExporter.DisposeAsync();
+}
 
 Console.WriteLine();
 Console.WriteLine("=====================================================================");

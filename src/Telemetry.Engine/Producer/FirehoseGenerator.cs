@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Threading.Channels;
 using Telemetry.Engine.Domain;
+using Telemetry.Engine.Observability;
 using Telemetry.Engine.Parsing;
 
 namespace Telemetry.Engine.Producer;
@@ -24,17 +25,20 @@ namespace Telemetry.Engine.Producer;
 public sealed class FirehoseGenerator
 {
     private readonly ChannelWriter<TelemetryBatch> _writer;
+    private readonly EngineMetrics _metrics;
     private readonly int _targetReadingsPerSecond;
     private readonly int _batchSize;
     private readonly int _sensorCount;
 
     public FirehoseGenerator(
         ChannelWriter<TelemetryBatch> writer,
+        EngineMetrics metrics,
         int targetReadingsPerSecond = 100_000,
         int batchSize = 1_000,
         int sensorCount = 64)
     {
         _writer = writer;
+        _metrics = metrics;
         _targetReadingsPerSecond = targetReadingsPerSecond;
         _batchSize = batchSize;
         _sensorCount = sensorCount;
@@ -81,6 +85,12 @@ public sealed class FirehoseGenerator
                 TelemetryBatch batch = BuildBatch(random);
                 await _writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
                 TotalProduced += batch.ReadingCount;
+
+                // Record AFTER the handoff so the counter reflects readings that
+                // actually entered the pipeline (back-pressure may have parked us
+                // above). The tag-less Add(long) overload boxes nothing and rents no
+                // tag array — this is a heap-free increment on the producer hot path.
+                _metrics.ReadingsProduced.Add(batch.ReadingCount);
             }
         }
         catch (OperationCanceledException)
