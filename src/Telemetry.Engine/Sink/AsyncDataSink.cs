@@ -99,13 +99,12 @@ public sealed class AsyncDataSink
 
         PopulateShardBuckets(cancellationToken);
 
-        // Kick off only non-empty shards. WriteAsync returns a ValueTask<int>;
-        // materialise each as a Task so they can be awaited via Task.WhenEach.
+        // Kick off only non-empty shards; collect the Tasks for WhenEach below.
         _pendingWrites.Clear();
         foreach (List<SensorSnapshot> bucket in _shardBuckets)
         {
             if (bucket.Count > 0)
-                _pendingWrites.Add(_database.WriteAsync(bucket, cancellationToken).AsTask());
+                _pendingWrites.Add(_database.WriteAsync(bucket, cancellationToken));
         }
 
         if (_pendingWrites.Count == 0)

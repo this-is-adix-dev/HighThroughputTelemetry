@@ -9,9 +9,11 @@ namespace Telemetry.Engine.Sink;
 /// interval to emulate I/O latency — but its async shape is exactly what a real
 /// driver would expose.
 ///
-/// <see cref="WriteAsync"/> returns a <see cref="ValueTask{T}"/>: writes frequently
-/// complete cheaply, and <c>ValueTask</c> lets the common path avoid allocating a
-/// <c>Task</c> object on every call.
+/// <see cref="WriteAsync"/> returns a <see cref="Task{T}"/>: this implementation
+/// always suspends on <c>Task.Delay</c>, so the async path is never elided and a
+/// <c>Task</c> is always allocated. A real driver that frequently completes
+/// synchronously (e.g. a cache hit) would benefit from <c>ValueTask&lt;int&gt;</c>,
+/// but advertising that optimization here would be misleading.
 /// </summary>
 public sealed class DummySlowDatabase
 {
@@ -32,7 +34,7 @@ public sealed class DummySlowDatabase
     /// Persist a shard of snapshots. Simulates a variable-latency round-trip and
     /// returns how many rows were written.
     /// </summary>
-    public async ValueTask<int> WriteAsync(IReadOnlyCollection<SensorSnapshot> rows, CancellationToken cancellationToken)
+    public async Task<int> WriteAsync(IReadOnlyCollection<SensorSnapshot> rows, CancellationToken cancellationToken)
     {
         if (rows.Count == 0)
             return 0;
