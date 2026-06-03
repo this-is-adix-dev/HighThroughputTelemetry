@@ -44,7 +44,11 @@ public sealed class FirehoseGenerator
         _sensorCount = sensorCount;
     }
 
-    /// <summary>Total readings emitted so far. Read across threads, so kept as a volatile-ish long via Interlocked at the call site.</summary>
+    /// <summary>
+    /// Total readings emitted so far. Written only by the single producer thread;
+    /// read only after <see cref="RunAsync"/> has completed (the <c>await</c> provides
+    /// the memory barrier). No <see cref="System.Threading.Interlocked"/> needed.
+    /// </summary>
     public long TotalProduced { get; private set; }
 
     /// <summary>
@@ -114,34 +118,45 @@ public sealed class FirehoseGenerator
         // so the batch buffer is twice the width it was before signing was introduced.
         int byteLength = _batchSize * TelemetryCodec.FrameSize;
         byte[] buffer = ArrayPool<byte>.Shared.Rent(byteLength);
-        Span<byte> destination = buffer.AsSpan(0, byteLength);
-
-        long nowTicks = DateTime.UtcNow.Ticks;
-
-        for (int i = 0; i < _batchSize; i++)
+        try
         {
-            var reading = new SensorReading(
-                SensorId: random.Next(_sensorCount),
-                TimestampTicks: nowTicks,
-                // A sine-ish + noise value so aggregated min/max/avg look alive.
-                Value: 20f + (float)(random.NextDouble() * 60.0));
+            Span<byte> destination = buffer.AsSpan(0, byteLength);
 
-            // Encode the data and append its truncated HMAC straight into this frame's
-            // slot in the pooled buffer. EncodeFrame stages the data through the inline-
-            // array PayloadBuffer internally, so that zero-allocation primitive still runs
-            // on the real hot path; signing then adds the 16-byte signature in place.
-            Span<byte> frame = destination.Slice(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize);
-            TelemetryCodec.EncodeFrame(in reading, frame);
+            long nowTicks = DateTime.UtcNow.Ticks;
 
-            // Integrity demo: with a small probability, flip one random bit in the frame
-            // AFTER it was signed — simulating an attacker (or line noise) tampering with
-            // the packet in flight. The signature no longer matches the data, so the
-            // consumer will detect and reject exactly these frames.
-            if (random.NextDouble() < TamperProbabilityPerFrame)
-                CorruptRandomBit(frame, random);
+            for (int i = 0; i < _batchSize; i++)
+            {
+                var reading = new SensorReading(
+                    SensorId: random.Next(_sensorCount),
+                    TimestampTicks: nowTicks,
+                    // A sine-ish + noise value so aggregated min/max/avg look alive.
+                    Value: 20f + (float)(random.NextDouble() * 60.0));
+
+                // Encode the data and append its truncated HMAC straight into this frame's
+                // slot in the pooled buffer. EncodeFrame stages the data through the inline-
+                // array PayloadBuffer internally, so that zero-allocation primitive still runs
+                // on the real hot path; signing then adds the 16-byte signature in place.
+                Span<byte> frame = destination.Slice(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize);
+                TelemetryCodec.EncodeFrame(in reading, frame);
+
+                // Integrity demo: with a small probability, flip one random bit in the frame
+                // AFTER it was signed — simulating an attacker (or line noise) tampering with
+                // the packet in flight. The signature no longer matches the data, so the
+                // consumer will detect and reject exactly these frames.
+                if (random.NextDouble() < TamperProbabilityPerFrame)
+                    CorruptRandomBit(frame, random);
+            }
+
+            return new TelemetryBatch(buffer, _batchSize);
         }
-
-        return new TelemetryBatch(buffer, _batchSize);
+        catch
+        {
+            // Return the rented buffer before propagating — the caller's finally block
+            // only calls batch.Return(), which never executes if we throw before returning
+            // the TelemetryBatch. Without this guard the buffer leaks back to the pool.
+            ArrayPool<byte>.Shared.Return(buffer);
+            throw;
+        }
     }
 
     /// <summary>
