@@ -152,7 +152,7 @@ public sealed class FirehoseGenerator
 
                 var reading = new SensorReading(
                     SensorId: random.Next(_sensorCount),
-                    TimestampTicks: nowTicks,
+                    TimestampTicks: nowTicks + (i * 10),
                     Value: value);
 
                 // Encode the data and append its truncated HMAC straight into this frame's
