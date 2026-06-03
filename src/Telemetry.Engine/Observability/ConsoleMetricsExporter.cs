@@ -51,7 +51,10 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private volatile Instrument? _batchSizeInstrument;
     private volatile Instrument? _rejectedInstrument;
 
-    private Task? _reportingLoop;
+    // volatile: Start() writes this on the caller's thread; DisposeAsync() reads and
+    // nulls it — potentially from a different thread. The other instrument fields are
+    // already volatile for the same reason; this field follows the same pattern.
+    private volatile Task? _reportingLoop;
 
     /// <summary>
     /// Cumulative number of frames the consumers rejected for a failed HMAC signature,
