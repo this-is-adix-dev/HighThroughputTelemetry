@@ -18,12 +18,13 @@ namespace Telemetry.Engine.Sink;
 ///   instant it lands and account for it immediately.</item>
 /// </list>
 ///
-/// The flush path is zero-allocation after construction: shard buckets and the
-/// pending-write list are pre-allocated once and cleared between flushes.
-/// Snapshot iteration uses a plain synchronous <see cref="IEnumerable{T}"/> to
-/// avoid the async state-machine overhead of <c>IAsyncEnumerable</c> for what is
-/// today an in-memory source. The <c>StreamSnapshots</c> method remains the seam
-/// where a genuinely async (e.g. paged-remote) source would be plugged in.
+/// The flush path is zero-allocation after construction: shard buckets, the
+/// pending-write list, and the snapshot buffer (in <see cref="SensorAggregator"/>)
+/// are all pre-allocated once and reused across every flush.
+/// Snapshot iteration runs synchronously in <c>PopulateShardBuckets</c> to keep
+/// the <see cref="ReadOnlySpan{T}"/> returned by
+/// <see cref="SensorAggregator.CreateSnapshot"/> within a single stack frame —
+/// spans cannot survive an <c>await</c>.
 /// </summary>
 public sealed class AsyncDataSink
 {
@@ -96,11 +97,7 @@ public sealed class AsyncDataSink
         foreach (List<SensorSnapshot> bucket in _shardBuckets)
             bucket.Clear();
 
-        foreach (SensorSnapshot snapshot in StreamSnapshots(cancellationToken))
-        {
-            int shard = (snapshot.SensorId & int.MaxValue) % _shardCount;
-            _shardBuckets[shard].Add(snapshot);
-        }
+        PopulateShardBuckets(cancellationToken);
 
         // Kick off only non-empty shards. WriteAsync returns a ValueTask<int>;
         // materialise each as a Task so they can be awaited via Task.WhenEach.
@@ -125,17 +122,22 @@ public sealed class AsyncDataSink
     }
 
     /// <summary>
-    /// Expose the aggregator's current snapshot as a synchronous stream.
-    /// This is the seam where a real implementation would page results from a
-    /// remote store; switching to <c>async IAsyncEnumerable</c> here requires no
-    /// changes to <see cref="FlushOnceAsync"/>.
+    /// Distribute the current aggregator snapshot across <see cref="_shardBuckets"/>.
+    /// Running synchronously keeps the <see cref="ReadOnlySpan{T}"/> returned by
+    /// <see cref="SensorAggregator.CreateSnapshot"/> within a single stack frame —
+    /// spans cannot be stored in async state machines. The span is fully consumed
+    /// before control returns to <see cref="FlushOnceAsync"/>, satisfying the
+    /// lifetime contract. This is the seam where a genuinely async (e.g.
+    /// paged-remote) source would switch to <c>async IAsyncEnumerable</c> without
+    /// changing the rest of <see cref="FlushOnceAsync"/>.
     /// </summary>
-    private IEnumerable<SensorSnapshot> StreamSnapshots(CancellationToken cancellationToken)
+    private void PopulateShardBuckets(CancellationToken cancellationToken)
     {
         foreach (SensorSnapshot snapshot in _aggregator.CreateSnapshot())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            yield return snapshot;
+            int shard = (snapshot.SensorId & int.MaxValue) % _shardCount;
+            _shardBuckets[shard].Add(snapshot);
         }
     }
 }

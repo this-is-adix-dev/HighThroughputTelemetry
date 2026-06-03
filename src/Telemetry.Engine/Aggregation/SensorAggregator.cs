@@ -27,6 +27,11 @@ namespace Telemetry.Engine.Aggregation;
 /// <c>ConcurrentDictionary&lt;int, SensorStatistics&gt;</c>. Direct array indexing
 /// via <c>reading.SensorId</c> eliminates hash computation, stripe-lock contention,
 /// and per-entry <c>Node&lt;K,V&gt;</c> heap allocations on every hot-path update.
+///
+/// <see cref="CreateSnapshot"/> writes into a pre-allocated <c>SensorSnapshot[]</c>
+/// and returns a <see cref="ReadOnlySpan{T}"/> slice — zero heap allocation per call.
+/// The span lifetime is bounded to one synchronous scope; callers must not hold it
+/// across an <c>await</c> or past the next <see cref="CreateSnapshot"/> call.
 /// </summary>
 public sealed class SensorAggregator
 {
@@ -34,6 +39,10 @@ public sealed class SensorAggregator
     // All entries are eagerly initialized at construction so the hot update path
     // is a single array-bounds-check + pointer-deref, not a dictionary lookup.
     private readonly SensorStatistics[] _bySensor;
+
+    // Reused across every CreateSnapshot call — eliminates the per-flush List<T>
+    // allocation. Sized to sensorCount so it can hold all entries in the worst case.
+    private readonly SensorSnapshot[] _snapshotBuffer;
 
     // Mutated only via Interlocked so reads and writes are always sequentially consistent.
     private long _totalProcessed;
@@ -50,6 +59,7 @@ public sealed class SensorAggregator
     public SensorAggregator(int sensorCount = 64)
     {
         _bySensor = new SensorStatistics[sensorCount];
+        _snapshotBuffer = new SensorSnapshot[sensorCount];
         for (int i = 0; i < sensorCount; i++)
             _bySensor[i] = new SensorStatistics();
     }
@@ -96,16 +106,20 @@ public sealed class SensorAggregator
     /// reading. Each bucket is sampled under its own lock, so this is consistent per
     /// sensor without ever stopping the world. The iteration order is ascending by
     /// <c>SensorId</c> and has perfect cache locality (sequential array walk).
+    ///
+    /// The returned <see cref="ReadOnlySpan{T}"/> points into <c>_snapshotBuffer</c>,
+    /// which is overwritten on the next call. Callers must consume the span within
+    /// the same synchronous scope and must not hold it past the next call.
     /// </summary>
-    public IReadOnlyList<SensorSnapshot> CreateSnapshot()
+    public ReadOnlySpan<SensorSnapshot> CreateSnapshot()
     {
-        var snapshots = new List<SensorSnapshot>(_bySensor.Length);
+        int count = 0;
         for (int i = 0; i < _bySensor.Length; i++)
         {
             SensorSnapshot snapshot = _bySensor[i].Snapshot(i);
             if (snapshot.Count > 0)
-                snapshots.Add(snapshot);
+                _snapshotBuffer[count++] = snapshot;
         }
-        return snapshots;
+        return _snapshotBuffer.AsSpan(0, count);
     }
 }
