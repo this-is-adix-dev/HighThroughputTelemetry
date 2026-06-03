@@ -56,9 +56,9 @@ public struct SensorStatistics
     /// </summary>
     public void Update(double value)
     {
-        Count++;
         Sum += value;
         if (value < Min) Min = value;
         if (value > Max) Max = value;
+        System.Threading.Volatile.Write(ref Count, Count + 1);
     }
 }
