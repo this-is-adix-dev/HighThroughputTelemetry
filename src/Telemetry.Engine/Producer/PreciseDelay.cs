@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Telemetry.Engine.Producer;
 
@@ -16,10 +17,10 @@ namespace Telemetry.Engine.Producer;
 /// <para><b>The fix — a two-phase hybrid wait:</b>
 /// <list type="number">
 ///   <item><b>Coarse phase:</b> for the portion of the wait that is comfortably longer
-///   than one timer tick, defer to <see cref="Task.Delay(TimeSpan, CancellationToken)"/>.
+///   than one OS timer tick, defer to <see cref="Task.Delay(TimeSpan, CancellationToken)"/>.
 ///   This frees the core back to the scheduler — no spinning — and cannot overshoot the
-///   real deadline because we always leave a tick-sized safety margin.</item>
-///   <item><b>Fine phase:</b> burn the remaining sub-tick margin with a
+///   real deadline because we always leave a platform-calibrated spin margin.</item>
+///   <item><b>Fine phase:</b> burn the remaining sub-tick tail with a
 ///   <see cref="SpinWait"/> measured against a <see cref="Stopwatch"/> timestamp, landing
 ///   on the deadline with microsecond accuracy.</item>
 /// </list>
@@ -30,12 +31,17 @@ namespace Telemetry.Engine.Producer;
 internal static class PreciseDelay
 {
     /// <summary>
-    /// Largest wait we are willing to satisfy by busy-spinning. It is sized one full
-    /// timer tick above the worst-case OS granularity (~15.6 ms): the coarse phase may
-    /// overshoot its target by up to one tick, so the spin margin must be at least that
-    /// wide for the deadline to always fall inside the fine phase rather than be missed.
+    /// Conservative platform estimate of the minimum time <see cref="Task.Delay"/> may
+    /// consume beyond its requested duration. The coarse phase is skipped entirely when
+    /// the full delay is shorter than this — there is nothing to amortize.
+    ///
+    /// <list type="bullet">
+    ///   <item>Windows scheduler tick: ~15.6 ms (timeBeginPeriod not assumed)</item>
+    ///   <item>Linux hrtimer granularity: ~1–4 µs; 1.5 ms gives headroom for load spikes</item>
+    /// </list>
     /// </summary>
-    private static readonly TimeSpan CoarseMargin = TimeSpan.FromMilliseconds(16);
+    private static readonly TimeSpan OsTimerGranularity = TimeSpan.FromMilliseconds(
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 15.6 : 1.5);
 
     /// <summary>
     /// Asynchronously waits for <paramref name="delay"/> with sub-millisecond precision.
@@ -51,8 +57,19 @@ internal static class PreciseDelay
         // DateTime, which is itself only tick-granular and is wall-clock (NTP-adjustable).
         long startTimestamp = Stopwatch.GetTimestamp();
 
-        // Phase 1 — coarse, thread-yielding sleep for everything beyond the spin margin.
-        TimeSpan coarse = delay - CoarseMargin;
+        // Phase 1 — coarse, thread-yielding sleep for the bulk of the wait.
+        //
+        // Spin margin = max(20% of delay, OS granularity floor). The two constraints:
+        //   (a) ≥ OsTimerGranularity  — Task.Delay must never overshoot the real deadline;
+        //       if the delay is shorter than one OS tick the coarse phase is skipped entirely.
+        //   (b) ≥ delay/5             — for very long delays, keeps the spin tail proportional
+        //       rather than a fixed absolute value that could drift under scheduling pressure.
+        //
+        // Before this fix, CoarseMargin was a hardcoded 16 ms. At 100k readings/sec with
+        // BatchSize=1000 the inter-batch period is 10 ms < 16 ms, so the coarse phase never
+        // fired and the producer busy-spun for the full 10 ms between every batch (~100% CPU).
+        TimeSpan margin = TimeSpan.FromTicks(Math.Max(delay.Ticks / 5, OsTimerGranularity.Ticks));
+        TimeSpan coarse = delay - margin;
         if (coarse > TimeSpan.Zero)
             await Task.Delay(coarse, cancellationToken).ConfigureAwait(false);
 

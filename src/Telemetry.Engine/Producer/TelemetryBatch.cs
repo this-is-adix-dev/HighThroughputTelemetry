@@ -12,14 +12,20 @@ namespace Telemetry.Engine.Producer;
 /// synchronization cost 100,000 times per second; batching amortizes it across a
 /// thousand readings at a time.
 ///
-/// The <see cref="Buffer"/> is rented from <see cref="ArrayPool{T}.Shared"/>, so it
+/// The backing array is rented from <see cref="ArrayPool{T}.Shared"/>, so it
 /// MUST be returned exactly once after consumption via <see cref="Return"/>.
+/// Consume data through <see cref="Span"/> — never the raw array — to avoid
+/// reading uninitialized bytes beyond <see cref="ByteLength"/>.
 /// A <c>readonly struct</c> keeps the envelope itself allocation-free.
 /// </summary>
 public readonly struct TelemetryBatch
 {
-    /// <summary>The pooled backing array. May be larger than <see cref="ByteLength"/>.</summary>
-    public byte[] Buffer { get; }
+    /// <summary>
+    /// The pooled backing array. May be larger than <see cref="ByteLength"/> — bytes beyond
+    /// that boundary are uninitialized memory from a previous rental. Internal only; external
+    /// callers must use <see cref="Span"/> to avoid silently reading stale pooled bytes.
+    /// </summary>
+    internal byte[] Buffer { get; }
 
     /// <summary>Number of readings actually present in this batch.</summary>
     public int ReadingCount { get; }
