@@ -42,6 +42,20 @@ public sealed class SensorStatistics
         }
     }
 
+    /// <summary>
+    /// Readings folded into this sensor so far. Read under the same lock as
+    /// <see cref="Update"/> so the value is never torn and carries the same memory
+    /// ordering — a plain field read could observe a stale zero on another core.
+    /// </summary>
+    public long Count
+    {
+        get
+        {
+            using (_gate.EnterScope())
+                return _count;
+        }
+    }
+
     /// <summary>Atomically copy the current state into an immutable snapshot.</summary>
     public SensorSnapshot Snapshot(int sensorId)
     {

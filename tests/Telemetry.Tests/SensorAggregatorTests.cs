@@ -22,6 +22,12 @@ public class SensorAggregatorTests
         Assert.Equal(10.0, snapshot.Min, precision: 5);
         Assert.Equal(30.0, snapshot.Max, precision: 5);
         Assert.Equal(20.0, snapshot.Average, precision: 5);
+
+        // Only sensor 1 was ever touched, so observed cardinality is 1 even though the
+        // configured domain is the default 64. This is the exact distinction the pipeline
+        // reports as DistinctSensors.
+        Assert.Equal(1, aggregator.ActiveSensorCount);
+        Assert.Equal(64, aggregator.SensorCount);
     }
 
     [Fact]
@@ -62,5 +68,39 @@ public class SensorAggregatorTests
         // not via direct Update calls. Verify correctness via per-sensor counts instead.
         long summedCounts = aggregator.CreateSnapshot().ToArray().Sum(s => s.Count);
         Assert.Equal((long)threads * perThread, summedCounts);
+    }
+
+    [Fact]
+    public async Task IngestBatch_IsThreadSafe_TotalProcessedIsExact()
+    {
+        const int sensorCount = 16;
+        const int framesPerBatch = 1_000;
+        const int threads = 8;
+
+        // One fully-signed batch that every thread will ingest concurrently.
+        var buffer = new byte[framesPerBatch * TelemetryCodec.FrameSize];
+        for (int i = 0; i < framesPerBatch; i++)
+        {
+            var reading = new SensorReading(SensorId: i % sensorCount, TimestampTicks: i, Value: i);
+            TelemetryCodec.EncodeFrame(in reading, buffer.AsSpan(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize));
+        }
+
+        var aggregator = new SensorAggregator(sensorCount);
+
+        // Fan the same batch through IngestBatch from many threads at once. The batched
+        // Interlocked.Add inside IngestBatch is what must keep TotalProcessed exact under
+        // contention — a plain non-atomic accumulation would lose updates here.
+        await Task.WhenAll(Enumerable.Range(0, threads).Select(_ =>
+            Task.Run(() => aggregator.IngestBatch(buffer))));
+
+        long expected = (long)threads * framesPerBatch;
+
+        // The headline assertion the Update-based test cannot make: the batched counter is exact.
+        Assert.Equal(expected, aggregator.TotalProcessed);
+
+        // And no folded reading was lost: per-sensor counts sum to the same total.
+        long summedCounts = aggregator.CreateSnapshot().ToArray().Sum(s => s.Count);
+        Assert.Equal(expected, summedCounts);
+        Assert.Equal(sensorCount, aggregator.ActiveSensorCount);
     }
 }

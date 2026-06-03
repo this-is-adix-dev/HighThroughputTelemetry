@@ -56,6 +56,24 @@ public sealed class SensorAggregator
     /// </summary>
     public int SensorCount => _bySensor.Length;
 
+    /// <summary>
+    /// Number of sensors that have actually received at least one reading — the
+    /// <i>observed</i> cardinality, as opposed to the configured domain size
+    /// <see cref="SensorCount"/>. Walks the sensor array once, reading each entry's count
+    /// under its own lock; intended for occasional reporting, not the hot path.
+    /// </summary>
+    public int ActiveSensorCount
+    {
+        get
+        {
+            int active = 0;
+            for (int i = 0; i < _bySensor.Length; i++)
+                if (_bySensor[i].Count > 0)
+                    active++;
+            return active;
+        }
+    }
+
     public SensorAggregator(int sensorCount = 64)
     {
         _bySensor = new SensorStatistics[sensorCount];

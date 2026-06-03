@@ -97,7 +97,10 @@ public sealed class TelemetryPipeline
         return new PipelineReport(
             Produced: producer.TotalProduced,
             Processed: aggregator.TotalProcessed,
-            DistinctSensors: aggregator.SensorCount,
+            // Observed cardinality, not the configured domain size: a run that only ever
+            // saw 40 of 64 possible sensors should report 40. Safe to compute here — every
+            // consumer has finished, so no thread is mutating the aggregator anymore.
+            DistinctSensors: aggregator.ActiveSensorCount,
             Flushes: sink.FlushCount,
             RowsPersisted: database.TotalRowsWritten,
             Elapsed: wallClock.Elapsed);

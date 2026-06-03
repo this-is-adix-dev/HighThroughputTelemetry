@@ -40,7 +40,7 @@ public class ParserBenchmarks
         }
     }
 
-    /// <summary>Baseline: allocates a temp array + a heap object per reading.</summary>
+    /// <summary>Baseline: verifies each frame's HMAC, then allocates two temp arrays + a heap object per reading.</summary>
     [Benchmark(Baseline = true)]
     public double Naive_AllocationHeavy()
     {
@@ -54,9 +54,9 @@ public class ParserBenchmarks
     }
 
     /// <summary>
-    /// Optimized: a ref-struct cursor over spans — zero heap allocation. Note it does
-    /// strictly more work than the naive baseline, re-deriving and constant-time-checking
-    /// each frame's HMAC, yet still allocates nothing.
+    /// Optimized: a ref-struct cursor over spans — zero heap allocation. It does exactly
+    /// the same work as the baseline (decode + constant-time HMAC verification of every
+    /// frame), so the head-to-head isolates allocation strategy alone — yet it allocates nothing.
     /// </summary>
     [Benchmark]
     public double ZeroAllocation_Span()
