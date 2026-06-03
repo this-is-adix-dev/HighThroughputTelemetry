@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Telemetry.Benchmarks/Telemetry.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Telemetry.Engine/Telemetry.Engine.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Telemetry.Tests/Telemetry.Tests.csproj" />
+  </Folder>
+</Solution>
