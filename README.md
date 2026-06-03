@@ -59,8 +59,8 @@ Everything is built around a fixed, little-endian 16-byte payload:
 
 | Offset | Field            | Type          | Size |
 |-------:|------------------|---------------|-----:|
-| 0      | `SensorId`       | `Int32`       | 4 B  |
-| 4      | `TimestampTicks` | `Int64`       | 8 B  |
+| 0      | `TimestampTicks` | `Int64`       | 8 B  |
+| 8      | `SensorId`       | `Int32`       | 4 B  |
 | 12     | `Value`          | `Single`      | 4 B  |
 
 ### Module A — Internal Firehose Generator (Producer)
@@ -72,8 +72,9 @@ Everything is built around a fixed, little-endian 16-byte payload:
 * Hands work off as **batches** (`TelemetryBatch`) through a **bounded
   `System.Threading.Channels.Channel`**, giving lock-free MPMC handoff with
   built-in **back-pressure** (`BoundedChannelFullMode.Wait`).
-* Every batch buffer is **rented from `ArrayPool<byte>`** and returned after
-  consumption, so steady-state GC pressure is essentially flat.
+* Every batch buffer is **rented from `ArrayPool<byte>`** and returned securely
+  via a **`try-finally` block**, ensuring no memory leaks occur even during
+  cancellation or unexpected errors, leaving steady-state GC pressure essentially flat.
 * Inter-batch pacing uses a plain **`Task.Delay`** floor. The downstream is a
   bounded channel with `FullMode.Wait`, which already absorbs producer jitter, and
   the deficit is recomputed against the wall clock every loop, so any timer
@@ -96,6 +97,9 @@ Everything is built around a fixed, little-endian 16-byte payload:
   **`[InlineArray]`** type: a 16-byte buffer laid out inline in the struct that
   can be returned **by value** with no allocation and no `unsafe fixed`.
 * Reading is passed by **`in`** to avoid copying the value struct.
+* Integrates AppSec directly into the hot path: **zero-allocation HMAC-SHA256**
+  signature verification using `stackalloc`, `[SkipLocalsInit]`, and
+  `CryptographicOperations.FixedTimeEquals` to prevent timing attacks.
 
 ### Module C — Lock-Free Sharded Aggregator
 [`Aggregation/`](src/Telemetry.Engine/Aggregation/)
@@ -114,9 +118,9 @@ Everything is built around a fixed, little-endian 16-byte payload:
   per-sensor fields.
 * `SensorStatistics` is now a **mutable `struct` stored by value** in the shard array,
   updated in place via `ref` — restoring genuine data cache-locality (no reference
-  walk feeding scattered heap pointer-chases). Adjacent sensors share a cache line,
-  but because a shard is single-writer that false sharing is harmless: it only costs
-  when *different cores* write the same line.
+  walk feeding scattered heap pointer-chases). Thread safety against concurrent snapshot
+  reads is guaranteed by carefully ordering updates and using **`Volatile.Write`** for
+  the final `Count` increment, which acts as a memory barrier preventing "dirty reads".
 * The only synchronization that remains is the periodic **`CreateSnapshot` fan-in**,
   which sums counts/sums and min/max-reduces across shards. It runs at the flush
   cadence (seconds apart), so moving the only cross-thread reads there makes them
@@ -136,14 +140,14 @@ Everything is built around a fixed, little-endian 16-byte payload:
   any `await`, satisfying the span lifetime contract and leaving a clean seam
   where a paged-remote source would switch to `async IAsyncEnumerable<T>`.
 * The **flush path is zero-allocation after construction**: shard buckets
-  (`List<SensorSnapshot>[]`) and the pending-write list (`List<Task<int>>`) are
-  pre-allocated once and reused across every flush — only `Clear()` is called,
-  not a new allocation.
+  (`List<SensorSnapshot>[]`) and the pending-write array (`Task<int>[]`) are
+  pre-allocated once and reused across every flush.
 * `DummySlowDatabase.WriteAsync` returns a **`Task<int>`** — it always suspends
   on `Task.Delay`, so a `ValueTask` wrapper would provide no allocation benefit
   and was excluded to avoid misleading callers.
 * Shards are written concurrently; completions are observed in *finish order*
-  with **.NET 9 `Task.WhenEach`** instead of `WhenAll`.
+  with **.NET 9 `Task.WhenEach`** over a sliced `Span` (`tasks[..count]`),
+  eliminating intermediate collection allocations.
 
 ### Observability
 [`Observability/`](src/Telemetry.Engine/Observability/)
@@ -167,9 +171,10 @@ Everything is built around a fixed, little-endian 16-byte payload:
 [`Orchestration/TelemetryPipeline.cs`](src/Telemetry.Engine/Orchestration/TelemetryPipeline.cs)
 is the composition root that wires the channel, the consumer fan-out, the
 aggregator, the sink and the observability exporter, then runs them for a bounded
-duration with a deterministic shutdown sequence (producer completes the channel →
-consumers drain → sink performs a final flush). `Program.cs` stays thin and also
-wires `Ctrl+C` to a graceful early stop.
+duration. It uses a **fast-fail orchestration mechanism** with `Task.WhenAny`—if
+any pipeline stage faults, the entire pipeline is instantly cancelled. Shutdown
+is deterministic (producer completes the channel → consumers drain → sink performs a
+final flush). `Program.cs` stays thin and also wires `Ctrl+C` to a graceful early stop.
 
 ---
 
@@ -178,22 +183,27 @@ wires `Ctrl+C` to a graceful early stop.
 | Feature | Where | Why it matters here |
 |---|---|---|
 | **Native AOT** (`PublishAot`) | `Telemetry.Engine.csproj` | No JIT, instant startup, ~1.6 MB self-contained binary |
+| **16-byte aligned `struct`** | `SensorReading` | Fields reordered to eliminate padding |
 | **Bounded `Channel<T>`** | Module A | Lock-free handoff + back-pressure |
 | **`ArrayPool<T>`** | Modules A/B | Zero steady-state GC for buffers |
+| **Robust `try-finally` pool returns** | Module A | Prevents leaks under cancellation |
 | **`PreciseDelay` (`SpinWait` + `Stopwatch`)** | benchmarked primitive | Sub-millisecond pacing without OS timer floor artifacts — measured, not applied to the firehose |
 | **`Span`/`ReadOnlySpan<byte>`** | Module B | Allocation-free slicing & parsing |
 | **`ref struct`** | `TelemetryParser` | Compiler-enforced no-heap-escape |
 | **`[InlineArray]`** | `PayloadBuffer` | Inline, escapable, safe fixed buffer |
+| **`CryptographicOperations.FixedTimeEquals`** | Module B | Constant-time HMAC verification to prevent timing attacks |
 | **`in` parameters / `readonly record struct`** | throughout | Pass-by-ref-no-copy value semantics |
 | **Per-consumer sharded `SensorStatistics[][]`** | Module C | Lock-free, uncontended hot path — no cross-core write-sharing on hot sensors |
 | **Mutable `struct` stat stored by value + `ref` update** | Module C | Contiguous data cache-locality; single-writer makes false sharing harmless |
+| **`Volatile.Write`** | Module C | Thread-safe memory barrier for snapshot readers |
 | **`Interlocked`** | Module C | Wait-free hot counter, batched per batch not per reading |
 | **Pre-allocated `ReadOnlySpan<SensorSnapshot>`** | Module C | Zero-alloc snapshot with bounded lifetime |
-| **Pre-allocated shard buckets** | Module D | Zero-alloc flush path after construction |
+| **Pre-allocated shard buckets & Task arrays** | Module D | Zero-alloc flush path after construction |
 | **`ValueTask`** | Module D | Allocation-free async on the empty-window path |
-| **`Task.WhenEach` (.NET 9)** | Module D | React to shard completions as they land |
+| **`Task.WhenEach` (.NET 9) padding** | Module D | React to shard completions allocation-free by padding and passing the full pre-allocated array, bypassing async-iterator slicing limits |
 | **`PeriodicTimer`** | Modules C/D/Observability | Async-native, allocation-light timers |
 | **`System.Diagnostics.Metrics` + `MeterListener`** | Observability | Native AOT-safe, zero-alloc instrumentation decoupled from consumers |
+| **Fast-fail `Task.WhenAny`** | Orchestration | Immediate cancellation on component fault |
 
 ---
 
@@ -262,6 +272,15 @@ dotnet publish src/Telemetry.Engine -c Release -r linux-x64
 ```
 
 (Swap `linux-x64` for `win-x64` or `osx-arm64` as needed.)
+
+### Run the Native AOT Docker Container (Chiseled)
+
+```bash
+docker build -t telemetry-engine .
+docker run --rm telemetry-engine
+```
+
+(Builds an ultra-minimal, non-root container based on Ubuntu Chiseled, demonstrating production-ready AppSec posture and a final image size of < 30 MB).
 
 ---
 

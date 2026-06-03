@@ -37,6 +37,7 @@ public sealed class AsyncDataSink
     // zero-allocation. Each bucket is sized for the expected sensor fan-out.
     private readonly List<SensorSnapshot>[] _shardBuckets;
     private readonly Task<int>[] _pendingWrites;
+    private readonly Task<int> _emptyTask = Task.FromResult(0);
 
     private long _flushCount;
     private long _rowsFlushed;
@@ -100,19 +101,29 @@ public sealed class AsyncDataSink
         PopulateShardBuckets(cancellationToken);
 
         // Kick off only non-empty shards; collect the Tasks for WhenEach below.
-        Array.Clear(_pendingWrites);
+        // Pad empty shards with a completed task to keep _pendingWrites fully populated.
+        // This lets us pass the whole array to WhenEach without slicing (allocating) it.
         int count = 0;
-        foreach (List<SensorSnapshot> bucket in _shardBuckets)
+        for (int i = 0; i < _shardBuckets.Length; i++)
         {
+            List<SensorSnapshot> bucket = _shardBuckets[i];
             if (bucket.Count > 0)
-                _pendingWrites[count++] = _database.WriteAsync(bucket, cancellationToken);
+            {
+                _pendingWrites[i] = _database.WriteAsync(bucket, cancellationToken);
+                count++;
+            }
+            else
+            {
+                _pendingWrites[i] = _emptyTask;
+            }
         }
 
         if (count == 0)
             return;
 
         // Observe completions in the order they actually finish, not submission order.
-        await foreach (Task<int> completed in Task.WhenEach(_pendingWrites[..count]).ConfigureAwait(false))
+        // Pass the full array directly. No slice, no allocation.
+        await foreach (Task<int> completed in Task.WhenEach(_pendingWrites).ConfigureAwait(false))
         {
             int rows = await completed.ConfigureAwait(false); // already complete; just unwraps the result
             Interlocked.Add(ref _rowsFlushed, rows);

@@ -233,10 +233,14 @@ public sealed class SensorAggregator
             for (int shard = 0; shard < shardCount; shard++)
             {
                 ref readonly SensorStatistics stats = ref _shards[shard][sensor];
-                if (stats.Count == 0)
+                
+                // Acquire fence: ensures we don't read Sum, Min, Max before Count
+                long observedCount = Volatile.Read(ref System.Runtime.CompilerServices.Unsafe.AsRef(in stats.Count));
+                
+                if (observedCount == 0)
                     continue; // untouched in this shard; its min/max are still the ±∞ identities.
 
-                totalCount += stats.Count;
+                totalCount += observedCount;
                 totalSum += stats.Sum;
                 if (stats.Min < min) min = stats.Min;
                 if (stats.Max > max) max = stats.Max;
