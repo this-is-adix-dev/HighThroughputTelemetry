@@ -42,7 +42,7 @@ public sealed class TelemetryPipeline
         // name, so the two sides remain decoupled.
         using var metrics = new EngineMetrics();
 
-        var aggregator = new SensorAggregator();
+        var aggregator = new SensorAggregator(_options.SensorCount);
         var database = new DummySlowDatabase();
         var sink = new AsyncDataSink(aggregator, database, _options.FlushInterval, _options.SinkShardCount);
         var producer = new FirehoseGenerator(

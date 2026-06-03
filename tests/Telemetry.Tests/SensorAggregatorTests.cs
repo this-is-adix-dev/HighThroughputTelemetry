@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Telemetry.Engine.Aggregation;
 using Telemetry.Engine.Domain;
 using Telemetry.Engine.Parsing;
@@ -34,7 +33,8 @@ public class SensorAggregatorTests
             TelemetryCodec.EncodeFrame(in reading, buffer.AsSpan(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize));
         }
 
-        var aggregator = new SensorAggregator();
+        // sensorCount: 5 matches the i % 5 domain above, so SensorCount is exact.
+        var aggregator = new SensorAggregator(sensorCount: 5);
         int ingested = aggregator.IngestBatch(buffer);
 
         Assert.Equal(count, ingested);
