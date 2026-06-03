@@ -41,6 +41,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private long _consumedTotal;
     private long _batchesTotal;
     private long _rejectedTotal;
+    private long _anomalousTotal;
 
     // Instrument identities captured in InstrumentPublished. `volatile` because they
     // are published on the thread that creates the meter and then read on the
@@ -50,6 +51,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private volatile Instrument? _consumedInstrument;
     private volatile Instrument? _batchSizeInstrument;
     private volatile Instrument? _rejectedInstrument;
+    private volatile Instrument? _anomalousInstrument;
 
     // volatile: Start() writes this on the caller's thread; DisposeAsync() reads and
     // nulls it — potentially from a different thread. The other instrument fields are
@@ -62,6 +64,13 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     /// that tamper detection actually fired during the run.
     /// </summary>
     public long RejectedTamperedTotal => Interlocked.Read(ref _rejectedTotal);
+
+    /// <summary>
+    /// Cumulative number of batches the SIMD <see cref="Processing.BatchAnomalyDetector"/>
+    /// flagged for a critical-threshold breach, observed purely through the metrics
+    /// pipeline. Surfaced so the final report can show the detector actually fired.
+    /// </summary>
+    public long AnomalousBatchesTotal => Interlocked.Read(ref _anomalousTotal);
 
     public ConsoleMetricsExporter(string? meterName = null, TimeSpan? reportInterval = null)
     {
@@ -113,6 +122,9 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
             case EngineMetrics.RejectedTamperedName:
                 _rejectedInstrument = instrument;
                 break;
+            case EngineMetrics.BatchesAnomalousName:
+                _anomalousInstrument = instrument;
+                break;
             default:
                 return; // an instrument we don't track — leave it unsubscribed.
         }
@@ -136,6 +148,8 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
             Interlocked.Add(ref _producedTotal, measurement);
         else if (ReferenceEquals(instrument, _rejectedInstrument))
             Interlocked.Add(ref _rejectedTotal, measurement);
+        else if (ReferenceEquals(instrument, _anomalousInstrument))
+            Interlocked.Add(ref _anomalousTotal, measurement);
     }
 
     /// <summary>
@@ -174,6 +188,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
                 long produced = Interlocked.Read(ref _producedTotal);
                 long batches = Interlocked.Read(ref _batchesTotal);
                 long rejected = Interlocked.Read(ref _rejectedTotal);
+                long anomalous = Interlocked.Read(ref _anomalousTotal);
 
                 // Divide by the real interval so the "per sec" figure stays correct
                 // even if the reporting cadence is ever retuned.
@@ -190,7 +205,8 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
                     $"Produced: {producedRate,8:N0} msg/sec | " +
                     $"Batches processed: {batches,6:N0} | " +
                     $"Total: {consumed,11:N0} | " +
-                    $"Tampered: {rejected,5:N0}");
+                    $"Tampered: {rejected,5:N0} | " +
+                    $"Anomalous: {anomalous,5:N0}");
             }
         }
         catch (OperationCanceledException)

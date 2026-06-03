@@ -38,6 +38,7 @@ public sealed class EngineMetrics : IDisposable
     public const string ReadingsConsumedName = "telemetry.readings.consumed";
     public const string BatchSizeName = "telemetry.batch.size";
     public const string RejectedTamperedName = "telemetry.readings.rejected.tampered";
+    public const string BatchesAnomalousName = "telemetry.batches.anomalous";
 
     private readonly Meter _meter;
 
@@ -56,6 +57,14 @@ public sealed class EngineMetrics : IDisposable
     /// this at (or very near) zero.
     /// </summary>
     public Counter<long> RejectedTampered { get; }
+
+    /// <summary>
+    /// Counts whole batches in which the SIMD <see cref="Processing.BatchAnomalyDetector"/>
+    /// found at least one reading breaching the critical threshold. Incremented once per
+    /// flagged batch (not per anomalous reading), so it tracks how often the fast pre-screen
+    /// fires rather than the total volume of out-of-range samples.
+    /// </summary>
+    public Counter<long> BatchesAnomalous { get; }
 
     public EngineMetrics()
     {
@@ -81,6 +90,11 @@ public sealed class EngineMetrics : IDisposable
             RejectedTamperedName,
             unit: "{reading}",
             description: "Total readings rejected because their HMAC signature failed verification (tampered/corrupted).");
+
+        BatchesAnomalous = _meter.CreateCounter<long>(
+            BatchesAnomalousName,
+            unit: "{batch}",
+            description: "Total batches the SIMD anomaly detector flagged for breaching the critical threshold.");
     }
 
     /// <summary>

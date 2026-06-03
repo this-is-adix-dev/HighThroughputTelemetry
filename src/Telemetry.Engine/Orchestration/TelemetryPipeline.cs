@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Threading.Channels;
 using Telemetry.Engine.Aggregation;
 using Telemetry.Engine.Observability;
+using Telemetry.Engine.Processing;
 using Telemetry.Engine.Producer;
 using Telemetry.Engine.Sink;
 
@@ -18,6 +19,12 @@ namespace Telemetry.Engine.Orchestration;
 /// </summary>
 public sealed class TelemetryPipeline
 {
+    /// <summary>
+    /// Reading value at or above which a batch is considered to contain a critical anomaly.
+    /// Fed to the SIMD <see cref="BatchAnomalyDetector"/> as a single broadcast comparand.
+    /// </summary>
+    private const float CriticalThreshold = 95.0f;
+
     private readonly PipelineOptions _options;
 
     public TelemetryPipeline(PipelineOptions? options = null) =>
@@ -113,6 +120,14 @@ public sealed class TelemetryPipeline
         {
             try
             {
+                // Fast SIMD pre-screen BEFORE the per-frame decode: one gather-based sweep
+                // over the whole batch tells us if any reading breaches the critical
+                // threshold. It is far cheaper than the full parse, so running it first lets
+                // us flag an alarming batch up front; the authoritative per-frame HMAC
+                // verification still happens in IngestBatch below.
+                if (BatchAnomalyDetector.HasCriticalAnomalies(batch.Span, CriticalThreshold))
+                    metrics.BatchesAnomalous.Add(1);
+
                 // IngestBatch is where TelemetryParser and SensorStatistics run; its
                 // return value is the count of readings successfully parsed and folded
                 // in — exactly the "consumed" figure and this batch's processed size.

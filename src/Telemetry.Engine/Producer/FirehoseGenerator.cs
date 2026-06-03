@@ -126,11 +126,19 @@ public sealed class FirehoseGenerator
 
             for (int i = 0; i < _batchSize; i++)
             {
+                // Most readings sit in a calm [20, 80) band so aggregated min/max/avg look
+                // alive. With a small probability we instead inject a spike well above the
+                // engine's critical threshold (95) — this is what gives the SIMD
+                // BatchAnomalyDetector something real to catch, so the "batches.anomalous"
+                // metric reflects genuine out-of-range samples rather than staying at zero.
+                float value = random.NextDouble() < AnomalyProbabilityPerFrame
+                    ? 96f + (float)(random.NextDouble() * 40.0) // critical spike: [96, 136)
+                    : 20f + (float)(random.NextDouble() * 60.0); // normal: [20, 80)
+
                 var reading = new SensorReading(
                     SensorId: random.Next(_sensorCount),
                     TimestampTicks: nowTicks,
-                    // A sine-ish + noise value so aggregated min/max/avg look alive.
-                    Value: 20f + (float)(random.NextDouble() * 60.0));
+                    Value: value);
 
                 // Encode the data and append its truncated HMAC straight into this frame's
                 // slot in the pooled buffer. EncodeFrame stages the data through the inline-
@@ -165,6 +173,14 @@ public sealed class FirehoseGenerator
     /// while guaranteeing a steady trickle of rejections to observe.
     /// </summary>
     private const double TamperProbabilityPerFrame = 0.001;
+
+    /// <summary>
+    /// Fraction of produced frames whose value is a deliberate critical spike (&gt; 95) to
+    /// exercise the SIMD anomaly-detection path. At ~0.05% per frame and 1,000 frames/batch
+    /// roughly a third of batches end up flagged — frequent enough to observe the detector
+    /// firing, rare enough that normal readings still dominate the aggregate.
+    /// </summary>
+    private const double AnomalyProbabilityPerFrame = 0.0005;
 
     /// <summary>
     /// Flip a single random bit somewhere in the 32-byte frame. Because the HMAC was
