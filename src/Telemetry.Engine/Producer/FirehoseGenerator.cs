@@ -73,16 +73,18 @@ public sealed class FirehoseGenerator
 
                 if (deficit < _batchSize)
                 {
-                    // Ahead of schedule. The naive move here is `await Task.Delay(1, …)`,
-                    // but the .NET timer queue can't resolve 1 ms on stock Windows — it
-                    // rounds up to a ~15.6 ms tick, so the producer oversleeps and then
-                    // emits a jittery burst to catch up. Instead we wait *precisely* until
-                    // the next full batch is genuinely owed, which at 100k/sec is on the
-                    // order of milliseconds. PreciseDelay sleeps coarsely for the bulk and
-                    // spin-waits only the sub-tick tail, so pacing stays smooth.
+                    // Ahead of schedule: wait until roughly the next full batch is owed. We pace
+                    // with a plain Task.Delay rather than the high-resolution PreciseDelay on
+                    // purpose. The downstream is a bounded Channel with FullMode.Wait, which already
+                    // absorbs producer jitter, and the deficit is recomputed against the wall clock
+                    // every iteration, so any timer overshoot is self-correcting on the next pass.
+                    // Sub-tick pacing precision is accuracy this pipeline cannot consume, and
+                    // PreciseDelay's spin tail would burn ~20% of a thread-pool core to deliver it —
+                    // a cost with no benefit here. PreciseDelay therefore stays a separately
+                    // benchmarked primitive (see Telemetry.Benchmarks) rather than the demo pacer.
                     double readingsUntilBatchDue = _batchSize - deficit;
                     TimeSpan untilDue = TimeSpan.FromSeconds(readingsUntilBatchDue / _targetReadingsPerSecond);
-                    await PreciseDelay.WaitAsync(untilDue, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(untilDue, cancellationToken).ConfigureAwait(false);
                     continue;
                 }
 

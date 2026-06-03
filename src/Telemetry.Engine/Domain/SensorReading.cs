@@ -15,20 +15,20 @@ namespace Telemetry.Engine.Domain;
 ///
 /// The on-wire layout is a fixed 16 bytes (little-endian):
 /// <code>
-///   | 0          3 | 4                    11 | 12        15 |
-///   |  SensorId    |     TimestampTicks      |    Value     |
-///   |  Int32 (4B)  |       Int64 (8B)        | Single (4B)  |
+///   | 0                    7 | 8         11 | 12        15 |
+///   |     TimestampTicks     |  SensorId    |    Value     |
+///   |       Int64 (8B)       |  Int32 (4B)  | Single (4B)  |
 /// </code>
 /// </summary>
-public readonly record struct SensorReading(int SensorId, long TimestampTicks, float Value)
+public readonly record struct SensorReading(long TimestampTicks, int SensorId, float Value)
 {
     /// <summary>Size of a single serialized payload, in bytes. The whole system is built around this constant.</summary>
     public const int Size = 16;
 
     // Field offsets inside the 16-byte frame. Kept here so the codec, the parser
     // and any external tooling all agree on a single source of truth.
-    public const int SensorIdOffset = 0;
-    public const int TimestampOffset = 4;
+    public const int TimestampOffset = 0;
+    public const int SensorIdOffset = 8;
     public const int ValueOffset = 12;
 
     /// <summary>Convenience view of the timestamp as a UTC <see cref="DateTime"/>.</summary>

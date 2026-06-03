@@ -135,7 +135,9 @@ public sealed class AsyncDataSink
         foreach (SensorSnapshot snapshot in _aggregator.CreateSnapshot())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            int shard = (snapshot.SensorId & int.MaxValue) % _shardCount;
+            // SensorId is always in [0, SensorCount) — out-of-domain ids are dropped at
+            // ingest — so it is non-negative and a plain modulo picks the shard safely.
+            int shard = snapshot.SensorId % _shardCount;
             _shardBuckets[shard].Add(snapshot);
         }
     }

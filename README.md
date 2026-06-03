@@ -13,9 +13,10 @@ data store — all running for 10 seconds and then shutting down cleanly.
 ┌──────────────┐   bounded     ┌──────────────┐   in SensorReading   ┌──────────────┐
 │  Firehose    │   Channel     │  Consumers   │  ──────────────────► │  Aggregator  │
 │  (Module A)  │ ───────────►  │  (fan-out)   │   zero-alloc parse   │  (Module C)  │
-│ 100k rd/s    │  TelemetryBatch│  Module B    │                      │ min/max/avg  │
-│ PreciseDelay │  (ArrayPool)  └──────────────┘                      └──────┬───────┘
-└──────────────┘                                                            │ ReadOnlySpan<SensorSnapshot>
+│ 100k rd/s    │  TelemetryBatch│  Module B    │                      │ sharded,     │
+│ Task.Delay   │  (ArrayPool)  └──────────────┘                      │ lock-free    │
+└──────────────┘                                                     └──────┬───────┘
+                                                                            │ ReadOnlySpan<SensorSnapshot>
                                                                             ▼
                                                                      ┌──────────────┐
                                                                      │  Async Sink  │
@@ -49,7 +50,7 @@ HighThroughputTelemetry.sln
 │   ├── Orchestration/               # composition root + run options
 │   └── Program.cs                   # thin entry point
 ├── tests/Telemetry.Tests/           # xUnit unit + concurrency tests
-└── benchmarks/Telemetry.Benchmarks/ # BenchmarkDotNet: naive vs zero-alloc parser
+└── benchmarks/Telemetry.Benchmarks/ # BenchmarkDotNet: parser alloc, lock contention, pacing
 ```
 
 ### The 16-byte wire frame
@@ -73,11 +74,14 @@ Everything is built around a fixed, little-endian 16-byte payload:
   built-in **back-pressure** (`BoundedChannelFullMode.Wait`).
 * Every batch buffer is **rented from `ArrayPool<byte>`** and returned after
   consumption, so steady-state GC pressure is essentially flat.
-* Inter-batch pacing uses **[`PreciseDelay`](src/Telemetry.Engine/Producer/PreciseDelay.cs)**
-  — a two-phase hybrid that coarse-sleeps with `Task.Delay` for the bulk of
-  the wait, then busy-spins with `SpinWait` measured against a `Stopwatch`
-  timestamp for the sub-tick tail. This prevents the OS timer floor (~15.6 ms
-  on Windows) from turning a smooth 10 ms cadence into bursty catch-up loops.
+* Inter-batch pacing uses a plain **`Task.Delay`** floor. The downstream is a
+  bounded channel with `FullMode.Wait`, which already absorbs producer jitter, and
+  the deficit is recomputed against the wall clock every loop, so any timer
+  overshoot is self-correcting — sub-tick pacing precision is accuracy the pipeline
+  cannot consume, and is not worth a busy-spin. The high-resolution
+  **[`PreciseDelay`](src/Telemetry.Engine/Producer/PreciseDelay.cs)** primitive is
+  kept and **separately benchmarked** (accuracy vs. CPU cost) rather than applied
+  where it earns nothing — see [`PacingBenchmarks`](benchmarks/Telemetry.Benchmarks/PacingBenchmarks.cs).
 
 ### Module B — Zero-Allocation Binary Parser
 [`Parsing/`](src/Telemetry.Engine/Parsing/)
@@ -93,19 +97,31 @@ Everything is built around a fixed, little-endian 16-byte payload:
   can be returned **by value** with no allocation and no `unsafe fixed`.
 * Reading is passed by **`in`** to avoid copying the value struct.
 
-### Module C — Lock-Free / Low-Lock Aggregator
+### Module C — Lock-Free Sharded Aggregator
 [`Aggregation/`](src/Telemetry.Engine/Aggregation/)
 
 * The global "readings processed" counter is **wait-free** via
   `System.Threading.Interlocked`, batched once per `IngestBatch` call (a 1000×
-  reduction in `LOCK XADD` instructions vs. incrementing per-reading).
-* Per-sensor statistics live in a **pre-sized `SensorStatistics[]`**, indexed
-  directly by `SensorId`. This replaces the former `ConcurrentDictionary`:
-  direct array indexing eliminates hash computation, stripe-lock contention, and
-  per-entry `Node<K,V>` heap allocations on every hot-path update.
-* Each `SensorStatistics` entry guards its compound min/max/avg update with the
-  new **.NET 9 `System.Threading.Lock`** (`using (_gate.EnterScope()) { … }`),
-  so distinct sensors never contend.
+  reduction in `LOCK XADD` instructions vs. incrementing per-reading). This is the
+  **only** atomic left on the hot path.
+* Per-sensor statistics are **sharded one array per consumer**: the aggregator holds
+  a `SensorStatistics[][]` and each consumer is handed a stable `shardIndex` (shard
+  count = consumer count) that it alone writes. Two consumers updating the same hot
+  sensor now touch two different cache lines in two different arrays, so the previous
+  design's Read-For-Ownership storm — every `Update` serializing on one shared
+  object's `Lock` and dirtying one shared cache line — is gone. Updates are
+  **uncontended, lock-free, and need neither `Lock` nor `Interlocked`** on the
+  per-sensor fields.
+* `SensorStatistics` is now a **mutable `struct` stored by value** in the shard array,
+  updated in place via `ref` — restoring genuine data cache-locality (no reference
+  walk feeding scattered heap pointer-chases). Adjacent sensors share a cache line,
+  but because a shard is single-writer that false sharing is harmless: it only costs
+  when *different cores* write the same line.
+* The only synchronization that remains is the periodic **`CreateSnapshot` fan-in**,
+  which sums counts/sums and min/max-reduces across shards. It runs at the flush
+  cadence (seconds apart), so moving the only cross-thread reads there makes them
+  effectively free. The win is measured, not just claimed — see
+  [`ContentionBenchmarks`](benchmarks/Telemetry.Benchmarks/ContentionBenchmarks.cs).
 * **`CreateSnapshot`** writes into a **pre-allocated `SensorSnapshot[]`** and
   returns a `ReadOnlySpan<SensorSnapshot>` slice — **zero heap allocation per
   call**. Callers must consume the span within a single synchronous scope and
@@ -164,13 +180,13 @@ wires `Ctrl+C` to a graceful early stop.
 | **Native AOT** (`PublishAot`) | `Telemetry.Engine.csproj` | No JIT, instant startup, ~1.6 MB self-contained binary |
 | **Bounded `Channel<T>`** | Module A | Lock-free handoff + back-pressure |
 | **`ArrayPool<T>`** | Modules A/B | Zero steady-state GC for buffers |
-| **`PreciseDelay` (`SpinWait` + `Stopwatch`)** | Module A | Sub-millisecond pacing without OS timer floor artifacts |
+| **`PreciseDelay` (`SpinWait` + `Stopwatch`)** | benchmarked primitive | Sub-millisecond pacing without OS timer floor artifacts — measured, not applied to the firehose |
 | **`Span`/`ReadOnlySpan<byte>`** | Module B | Allocation-free slicing & parsing |
 | **`ref struct`** | `TelemetryParser` | Compiler-enforced no-heap-escape |
 | **`[InlineArray]`** | `PayloadBuffer` | Inline, escapable, safe fixed buffer |
 | **`in` parameters / `readonly record struct`** | throughout | Pass-by-ref-no-copy value semantics |
-| **`SensorStatistics[]` direct array index** | Module C | O(1) lookup with no hashing, no stripe-lock, no node allocs |
-| **`System.Threading.Lock` (.NET 9)** | Module C | Faster, scope-based mutual exclusion per sensor bucket |
+| **Per-consumer sharded `SensorStatistics[][]`** | Module C | Lock-free, uncontended hot path — no cross-core write-sharing on hot sensors |
+| **Mutable `struct` stat stored by value + `ref` update** | Module C | Contiguous data cache-locality; single-writer makes false sharing harmless |
 | **`Interlocked`** | Module C | Wait-free hot counter, batched per batch not per reading |
 | **Pre-allocated `ReadOnlySpan<SensorSnapshot>`** | Module C | Zero-alloc snapshot with bounded lifetime |
 | **Pre-allocated shard buckets** | Module D | Zero-alloc flush path after construction |
@@ -215,16 +231,28 @@ Simulation complete.
 dotnet test
 ```
 
-### Run the benchmarks (naive vs zero-allocation parser)
+### Run the benchmarks
 
 ```bash
+# Pick a suite interactively, or target one with --filter:
 dotnet run -c Release --project benchmarks/Telemetry.Benchmarks
+dotnet run -c Release --project benchmarks/Telemetry.Benchmarks -- --filter '*Contention*'
+dotnet run -c Release --project benchmarks/Telemetry.Benchmarks -- --filter '*'   # run all
 ```
 
-`[MemoryDiagnoser]` is enabled, so the report's **Allocated** column is the point
-of interest: the naive parser allocates a throwaway array **and** a heap object
-per reading (and a growing `List<T>`), while `TelemetryParser` allocates **0 B**
-regardless of how many readings it decodes.
+Three suites:
+
+* **`ParserBenchmarks`** — naive vs. zero-allocation parser. `[MemoryDiagnoser]` is
+  enabled, so the **Allocated** column is the point: the naive parser allocates a
+  throwaway array **and** a heap object per reading (and a growing `List<T>`), while
+  `TelemetryParser` allocates **0 B** regardless of how many readings it decodes.
+* **`ContentionBenchmarks`** — the Red-Flag-B proof. 1/2/4/8/16 threads all hammer a
+  single hot sensor: the **shared-locked** baseline's wall time climbs ~linearly with
+  threads (the throughput cliff) while the **per-consumer sharded** aggregator stays
+  flat — the ratio widens to a large multiple by 16 threads.
+* **`PacingBenchmarks`** — `PreciseDelay` vs. `Task.Delay` across sub-tick targets,
+  documenting the accuracy/CPU-cost trade-off (precise but spin-bound vs. coarse but
+  free) that justifies pacing the firehose with `Task.Delay`.
 
 ### Publish a Native AOT binary
 
@@ -242,21 +270,31 @@ dotnet publish src/Telemetry.Engine -c Release -r linux-x64
 * **Batching** is the single biggest throughput lever: pushing one reading at a
   time through the channel would pay synchronization cost 100k times/sec; batching
   amortizes it across ~1,000 readings.
-* **Two-tier synchronization** matches each piece of state to its contention
-  profile: a wait-free `Interlocked` counter for the single global hot integer,
-  fine-grained per-bucket `Lock`s for compound per-sensor updates.
-* **Array vs. dictionary for sensor state**: replacing `ConcurrentDictionary` with
-  a pre-sized `SensorStatistics[]` trades the bounded sensor domain assumption for
-  O(1) direct indexing with zero per-update allocation, no hash computation, and
-  no stripe-lock contention across sensors.
+* **Sharded, lock-free aggregation** is the decisive contention win: instead of one
+  shared per-sensor object behind a `Lock`, each consumer owns a private
+  `SensorStatistics[]` shard and is its sole writer, so per-sensor updates are
+  uncontended and need no synchronization at all. The single remaining `Interlocked`
+  counter (global readings-processed, batched per batch) and the once-per-flush
+  fan-in are the only cross-thread coordination left. The
+  [contention benchmark](benchmarks/Telemetry.Benchmarks/ContentionBenchmarks.cs)
+  shows the locked baseline's throughput collapsing as cores are added while the
+  sharded design stays flat.
+* **Array vs. dictionary for sensor state**: a pre-sized array (now one per shard)
+  trades the bounded sensor domain assumption for O(1) direct indexing with zero
+  per-update allocation and no hash computation; storing the stats `struct` by value
+  keeps each shard's data contiguous in cache.
 * **Pre-allocated snapshot and flush buffers** eliminate the last remaining GC
   pressure on the hot path: `SensorAggregator.CreateSnapshot` reuses a fixed
   `SensorSnapshot[]`, and `AsyncDataSink` reuses its shard `List<T>` instances
   across every flush cycle.
-* **`PreciseDelay`** prevents the OS timer floor from degrading pacing accuracy:
-  on Windows the timer tick is ~15.6 ms, so any `Task.Delay` shorter than that
-  parks the thread for a full tick. The two-phase hybrid (coarse sleep + `SpinWait`
-  fine tail) delivers microsecond-accurate inter-batch cadence on every platform.
+* **`PreciseDelay` is kept as a primitive, not used as the firehose pacer.** On
+  Windows the timer tick is ~15.6 ms, so any `Task.Delay` shorter than that parks
+  the thread for a full tick; the two-phase hybrid (coarse sleep + `SpinWait` fine
+  tail) delivers microsecond-accurate cadence — at the cost of busy-spinning the
+  tail. Because the bounded channel already absorbs producer jitter, that precision
+  buys the pipeline nothing, so the firehose paces with a plain `Task.Delay` and the
+  primitive's accuracy/CPU-cost trade-off is documented with numbers in
+  [`PacingBenchmarks`](benchmarks/Telemetry.Benchmarks/PacingBenchmarks.cs) instead.
 * **Observability is fully decoupled**: `ConsoleMetricsExporter` never imports
   `EngineMetrics` — it matches by meter name. The producing and observing sides
   are order-independent and can be swapped for any `MeterListener`-compatible

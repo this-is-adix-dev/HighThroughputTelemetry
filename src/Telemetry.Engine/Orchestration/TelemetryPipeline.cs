@@ -49,7 +49,9 @@ public sealed class TelemetryPipeline
         // name, so the two sides remain decoupled.
         using var metrics = new EngineMetrics();
 
-        var aggregator = new SensorAggregator(_options.SensorCount);
+        // One shard per consumer: each consumer below is handed a stable shard index and is the
+        // sole writer of that shard, so the per-sensor accumulator updates are fully uncontended.
+        var aggregator = new SensorAggregator(_options.SensorCount, _options.ConsumerCount);
         var database = new DummySlowDatabase();
         var sink = new AsyncDataSink(aggregator, database, _options.FlushInterval, _options.SinkShardCount);
         var producer = new FirehoseGenerator(
@@ -72,7 +74,7 @@ public sealed class TelemetryPipeline
 
         var consumerTasks = new Task[_options.ConsumerCount];
         for (int i = 0; i < consumerTasks.Length; i++)
-            consumerTasks[i] = ConsumeAsync(channel.Reader, aggregator, metrics);
+            consumerTasks[i] = ConsumeAsync(channel.Reader, aggregator, metrics, shardIndex: i);
 
         Task sinkTask = sink.RunAsync(token);
 
@@ -109,12 +111,14 @@ public sealed class TelemetryPipeline
     /// <summary>
     /// One consumer worker: drain batches, decode each with the zero-allocation
     /// parser via the aggregator, record observability, and always return the pooled
-    /// buffer.
+    /// buffer. Owns the aggregator shard identified by <paramref name="shardIndex"/> — it is the
+    /// sole writer of that shard, which is what makes the per-sensor update path lock-free.
     /// </summary>
     private static async Task ConsumeAsync(
         ChannelReader<TelemetryBatch> reader,
         SensorAggregator aggregator,
-        EngineMetrics metrics)
+        EngineMetrics metrics,
+        int shardIndex)
     {
         // ReadAllAsync (no token) drains until the writer is completed, so in-flight
         // batches are never dropped on shutdown. The await yields the thread while
@@ -134,7 +138,11 @@ public sealed class TelemetryPipeline
                 // IngestBatch is where TelemetryParser and SensorStatistics run; its
                 // return value is the count of readings successfully parsed and folded
                 // in — exactly the "consumed" figure and this batch's processed size.
-                int ingested = aggregator.IngestBatch(batch.Span, metrics.RejectedTampered);
+                // Tampered frames and authentic-but-out-of-domain SensorIds are dropped
+                // and counted separately, never folded in — so one bad frame can neither
+                // skew the aggregate nor fault this consumer.
+                int ingested = aggregator.IngestBatch(
+                    shardIndex, batch.Span, metrics.RejectedTampered, metrics.RejectedOutOfRange);
 
                 // Two tag-less recordings. Add(long)/Record(int) take the value by
                 // value, so there is no boxing and no tag array — zero heap traffic on

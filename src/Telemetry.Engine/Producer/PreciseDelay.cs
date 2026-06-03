@@ -27,8 +27,16 @@ namespace Telemetry.Engine.Producer;
 /// This is the <c>SpinWait</c>/precise-timer pattern you would reach for in a genuine
 /// low-latency system, expressed as a reusable primitive instead of being smeared across
 /// the producer loop.</para>
+///
+/// <para><b>Why it is no longer the demo producer's pacer.</b> The firehose downstream is a
+/// bounded channel with <c>FullMode.Wait</c>, which already absorbs producer jitter, so the
+/// sub-tick precision this delivers is accuracy that pipeline cannot consume — and the fine-phase
+/// spin would burn a meaningful slice of a core to provide it. The producer therefore paces with a
+/// plain <see cref="Task.Delay(TimeSpan, CancellationToken)"/>; this primitive is kept and measured
+/// on its own (accuracy and CPU cost) in <c>Telemetry.Benchmarks</c> so its trade-off is documented
+/// with numbers rather than applied where it is not warranted.</para>
 /// </summary>
-internal static class PreciseDelay
+public static class PreciseDelay
 {
     /// <summary>
     /// Conservative platform estimate of the minimum time <see cref="Task.Delay"/> may

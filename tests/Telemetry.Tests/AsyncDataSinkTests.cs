@@ -11,7 +11,7 @@ public class AsyncDataSinkTests
     {
         var aggregator = new SensorAggregator();
         for (int sensor = 0; sensor < 10; sensor++)
-            aggregator.Update(new SensorReading(sensor, TimestampTicks: 0, Value: sensor));
+            aggregator.Update(new SensorReading(SensorId: sensor, TimestampTicks: 0, Value: sensor));
 
         var database = new DummySlowDatabase(minLatencyMs: 0, maxLatencyMs: 1);
         var sink = new AsyncDataSink(aggregator, database, flushInterval: TimeSpan.FromHours(1), shardCount: 4);

@@ -71,7 +71,7 @@ public class CodecTests
     public void Sign_Then_Verify_RoundTrips()
     {
         Span<byte> data = stackalloc byte[SensorReading.Size];
-        TelemetryCodec.Encode(new SensorReading(11, 22, 3.5f), data);
+        TelemetryCodec.Encode(new SensorReading(22, 11, 3.5f), data);
 
         Span<byte> signature = stackalloc byte[TelemetryCodec.SignatureSize];
         TelemetryCodec.Sign(data, signature);
@@ -83,7 +83,7 @@ public class CodecTests
     public void Sign_IsDeterministic_ForTheSameData()
     {
         Span<byte> data = stackalloc byte[SensorReading.Size];
-        TelemetryCodec.Encode(new SensorReading(1, 2, 3f), data);
+        TelemetryCodec.Encode(new SensorReading(2, 1, 3f), data);
 
         Span<byte> a = stackalloc byte[TelemetryCodec.SignatureSize];
         Span<byte> b = stackalloc byte[TelemetryCodec.SignatureSize];
@@ -97,7 +97,7 @@ public class CodecTests
     public void Verify_Fails_WhenDataIsTampered()
     {
         Span<byte> data = stackalloc byte[SensorReading.Size];
-        TelemetryCodec.Encode(new SensorReading(7, 8, 9f), data);
+        TelemetryCodec.Encode(new SensorReading(8, 7, 9f), data);
 
         Span<byte> signature = stackalloc byte[TelemetryCodec.SignatureSize];
         TelemetryCodec.Sign(data, signature);
@@ -111,7 +111,7 @@ public class CodecTests
     public void Verify_Fails_WhenSignatureIsTampered()
     {
         Span<byte> data = stackalloc byte[SensorReading.Size];
-        TelemetryCodec.Encode(new SensorReading(7, 8, 9f), data);
+        TelemetryCodec.Encode(new SensorReading(8, 7, 9f), data);
 
         Span<byte> signature = stackalloc byte[TelemetryCodec.SignatureSize];
         TelemetryCodec.Sign(data, signature);

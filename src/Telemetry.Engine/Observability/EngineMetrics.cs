@@ -38,6 +38,7 @@ public sealed class EngineMetrics : IDisposable
     public const string ReadingsConsumedName = "telemetry.readings.consumed";
     public const string BatchSizeName = "telemetry.batch.size";
     public const string RejectedTamperedName = "telemetry.readings.rejected.tampered";
+    public const string RejectedOutOfRangeName = "telemetry.readings.rejected.outofrange";
     public const string BatchesAnomalousName = "telemetry.batches.anomalous";
 
     private readonly Meter _meter;
@@ -57,6 +58,14 @@ public sealed class EngineMetrics : IDisposable
     /// this at (or very near) zero.
     /// </summary>
     public Counter<long> RejectedTampered { get; }
+
+    /// <summary>
+    /// Counts authentic readings discarded because their <c>SensorId</c> fell outside the
+    /// configured <c>[0, SensorCount)</c> domain — e.g. a signer/consumer configuration
+    /// drift. A healthy, correctly-configured pipeline keeps this at exactly zero; a
+    /// non-zero value is an early warning of a misconfiguration upstream.
+    /// </summary>
+    public Counter<long> RejectedOutOfRange { get; }
 
     /// <summary>
     /// Counts whole batches in which the SIMD <see cref="Processing.BatchAnomalyDetector"/>
@@ -90,6 +99,11 @@ public sealed class EngineMetrics : IDisposable
             RejectedTamperedName,
             unit: "{reading}",
             description: "Total readings rejected because their HMAC signature failed verification (tampered/corrupted).");
+
+        RejectedOutOfRange = _meter.CreateCounter<long>(
+            RejectedOutOfRangeName,
+            unit: "{reading}",
+            description: "Total authentic readings dropped because their SensorId fell outside the configured domain.");
 
         BatchesAnomalous = _meter.CreateCounter<long>(
             BatchesAnomalousName,

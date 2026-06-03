@@ -41,6 +41,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private long _consumedTotal;
     private long _batchesTotal;
     private long _rejectedTotal;
+    private long _outOfRangeTotal;
     private long _anomalousTotal;
 
     // Instrument identities captured in InstrumentPublished. `volatile` because they
@@ -51,6 +52,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private volatile Instrument? _consumedInstrument;
     private volatile Instrument? _batchSizeInstrument;
     private volatile Instrument? _rejectedInstrument;
+    private volatile Instrument? _outOfRangeInstrument;
     private volatile Instrument? _anomalousInstrument;
 
     // volatile: Start() writes this on the caller's thread; DisposeAsync() reads and
@@ -64,6 +66,14 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     /// that tamper detection actually fired during the run.
     /// </summary>
     public long RejectedTamperedTotal => Interlocked.Read(ref _rejectedTotal);
+
+    /// <summary>
+    /// Cumulative number of authentic frames dropped because their <c>SensorId</c> fell
+    /// outside the configured domain, observed purely through the metrics pipeline.
+    /// Surfaced in the final report as a misconfiguration tripwire — it stays at zero for a
+    /// correctly-configured run.
+    /// </summary>
+    public long RejectedOutOfRangeTotal => Interlocked.Read(ref _outOfRangeTotal);
 
     /// <summary>
     /// Cumulative number of batches the SIMD <see cref="Processing.BatchAnomalyDetector"/>
@@ -122,6 +132,9 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
             case EngineMetrics.RejectedTamperedName:
                 _rejectedInstrument = instrument;
                 break;
+            case EngineMetrics.RejectedOutOfRangeName:
+                _outOfRangeInstrument = instrument;
+                break;
             case EngineMetrics.BatchesAnomalousName:
                 _anomalousInstrument = instrument;
                 break;
@@ -148,6 +161,8 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
             Interlocked.Add(ref _producedTotal, measurement);
         else if (ReferenceEquals(instrument, _rejectedInstrument))
             Interlocked.Add(ref _rejectedTotal, measurement);
+        else if (ReferenceEquals(instrument, _outOfRangeInstrument))
+            Interlocked.Add(ref _outOfRangeTotal, measurement);
         else if (ReferenceEquals(instrument, _anomalousInstrument))
             Interlocked.Add(ref _anomalousTotal, measurement);
     }

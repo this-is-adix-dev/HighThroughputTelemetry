@@ -12,7 +12,7 @@ namespace Telemetry.Engine.Parsing;
 /// <code>
 ///   | 0                       15 | 16                      31 |
 ///   |        16-byte data        |    16-byte HMAC (trunc.)   |
-///   | SensorId / Timestamp /Value |    truncated HMAC-SHA256   |
+///   | Timestamp / SensorId /Value |    truncated HMAC-SHA256   |
 /// </code>
 /// The first half is the plaintext reading (see <see cref="SensorReading"/>); the
 /// second half is a truncated HMAC-SHA256 signature over that half, letting a consumer
@@ -71,7 +71,7 @@ public static class TelemetryCodec
         long ticks = BinaryPrimitives.ReadInt64LittleEndian(source[SensorReading.TimestampOffset..]);
         float value = BinaryPrimitives.ReadSingleLittleEndian(source[SensorReading.ValueOffset..]);
 
-        return new SensorReading(sensorId, ticks, value);
+        return new SensorReading(ticks, sensorId, value);
     }
 
     /// <summary>

@@ -21,9 +21,9 @@ public class TelemetryParserTests
     {
         var expected = new[]
         {
-            new SensorReading(1, 100, 1.0f),
-            new SensorReading(2, 200, 2.0f),
-            new SensorReading(3, 300, 3.0f),
+            new SensorReading(100, 1, 1.0f),
+            new SensorReading(200, 2, 2.0f),
+            new SensorReading(300, 3, 3.0f),
         };
         byte[] buffer = BuildBuffer(expected);
 
@@ -72,9 +72,9 @@ public class TelemetryParserTests
     {
         var readings = new[]
         {
-            new SensorReading(1, 100, 1.0f),
-            new SensorReading(2, 200, 2.0f), // this one gets corrupted
-            new SensorReading(3, 300, 3.0f),
+            new SensorReading(100, 1, 1.0f),
+            new SensorReading(200, 2, 2.0f), // this one gets corrupted
+            new SensorReading(300, 3, 3.0f),
         };
         byte[] buffer = BuildBuffer(readings);
 
@@ -94,8 +94,8 @@ public class TelemetryParserTests
     public void TryReadNext_IncrementsRejectedCounter_OnTamperedFrame()
     {
         byte[] buffer = BuildBuffer(
-            new SensorReading(1, 100, 1.0f),
-            new SensorReading(2, 200, 2.0f));
+            new SensorReading(100, 1, 1.0f),
+            new SensorReading(200, 2, 2.0f));
 
         // Corrupt the second frame's signature section (its very last byte).
         buffer[(2 * TelemetryCodec.FrameSize) - 1] ^= 0xFF;
