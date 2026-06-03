@@ -36,7 +36,7 @@ public sealed class AsyncDataSink
     // Pre-allocated once; cleared and reused every flush so the hot path is
     // zero-allocation. Each bucket is sized for the expected sensor fan-out.
     private readonly List<SensorSnapshot>[] _shardBuckets;
-    private readonly List<Task<int>> _pendingWrites;
+    private readonly Task<int>[] _pendingWrites;
 
     private long _flushCount;
     private long _rowsFlushed;
@@ -56,7 +56,7 @@ public sealed class AsyncDataSink
         for (int i = 0; i < shardCount; i++)
             _shardBuckets[i] = new List<SensorSnapshot>(capacity: 64);
 
-        _pendingWrites = new List<Task<int>>(shardCount);
+        _pendingWrites = new Task<int>[shardCount];
     }
 
     public long FlushCount => Interlocked.Read(ref _flushCount);
@@ -100,18 +100,19 @@ public sealed class AsyncDataSink
         PopulateShardBuckets(cancellationToken);
 
         // Kick off only non-empty shards; collect the Tasks for WhenEach below.
-        _pendingWrites.Clear();
+        Array.Clear(_pendingWrites);
+        int count = 0;
         foreach (List<SensorSnapshot> bucket in _shardBuckets)
         {
             if (bucket.Count > 0)
-                _pendingWrites.Add(_database.WriteAsync(bucket, cancellationToken));
+                _pendingWrites[count++] = _database.WriteAsync(bucket, cancellationToken);
         }
 
-        if (_pendingWrites.Count == 0)
+        if (count == 0)
             return;
 
         // Observe completions in the order they actually finish, not submission order.
-        await foreach (Task<int> completed in Task.WhenEach(_pendingWrites).ConfigureAwait(false))
+        await foreach (Task<int> completed in Task.WhenEach(_pendingWrites[..count]).ConfigureAwait(false))
         {
             int rows = await completed.ConfigureAwait(false); // already complete; just unwraps the result
             Interlocked.Add(ref _rowsFlushed, rows);
