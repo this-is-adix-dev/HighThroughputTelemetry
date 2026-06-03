@@ -1,0 +1,37 @@
+# Build output – never needed in the Docker build context; the SDK restores
+# and compiles from source inside the build stage.
+**/bin/
+**/obj/
+
+# Version control metadata – irrelevant to the build and can contain large
+# pack files that bloat the context transfer to the daemon.
+.git/
+.gitignore
+.gitattributes
+
+# Test and benchmark projects are not published and should not be sent to the
+# daemon; they have their own large dependency graphs that would slow context
+# transfer and pollute the build cache.
+benchmarks/
+tests/
+
+# Documentation and tooling files – no runtime relevance.
+docs/
+*.md
+*.txt
+diff.txt
+
+# IDE / editor artefacts.
+.vscode/
+.idea/
+*.user
+*.suo
+
+# BenchmarkDotNet result artefacts written to the repo root.
+BenchmarkDotNet.Artifacts/
+
+# Local CI / secrets that must never enter an image.
+.env
+*.env
+*.pfx
+*.key

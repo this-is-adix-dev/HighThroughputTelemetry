@@ -18,6 +18,22 @@
       time rather than at runtime.
     -->
     <PublishAot>true</PublishAot>
+
+    <!--
+      Instructs the ILC (IL Compiler) to emit code optimized for throughput
+      rather than binary size. On a hot-loop telemetry engine this yields
+      measurably better steady-state performance at the cost of ~5-10 % larger
+      native image — an acceptable trade-off in a server context.
+    -->
+    <OptimizationPreference>Speed</OptimizationPreference>
+
+    <!--
+      Strip DWARF debug symbols from the published binary in Release builds.
+      Keeps the container image as small as possible and eliminates a potential
+      information-disclosure vector (symbol names, source paths) in production.
+    -->
+    <StripSymbols>true</StripSymbols>
+
     <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- Allows the hardware-intrinsic / MemoryMarshal fast paths used in the parser. -->
