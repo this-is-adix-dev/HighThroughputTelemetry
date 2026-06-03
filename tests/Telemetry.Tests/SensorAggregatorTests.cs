@@ -27,11 +27,11 @@ public class SensorAggregatorTests
     public void IngestBatch_FoldsEveryFrame()
     {
         const int count = 50;
-        var buffer = new byte[count * SensorReading.Size];
+        var buffer = new byte[count * TelemetryCodec.FrameSize];
         for (int i = 0; i < count; i++)
         {
             var reading = new SensorReading(SensorId: i % 5, TimestampTicks: i, Value: i);
-            TelemetryCodec.Encode(in reading, buffer.AsSpan(i * SensorReading.Size, SensorReading.Size));
+            TelemetryCodec.EncodeFrame(in reading, buffer.AsSpan(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize));
         }
 
         var aggregator = new SensorAggregator();

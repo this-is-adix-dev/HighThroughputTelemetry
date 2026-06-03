@@ -37,6 +37,7 @@ public sealed class EngineMetrics : IDisposable
     public const string ReadingsProducedName = "telemetry.readings.produced";
     public const string ReadingsConsumedName = "telemetry.readings.consumed";
     public const string BatchSizeName = "telemetry.batch.size";
+    public const string RejectedTamperedName = "telemetry.readings.rejected.tampered";
 
     private readonly Meter _meter;
 
@@ -48,6 +49,13 @@ public sealed class EngineMetrics : IDisposable
 
     /// <summary>Distribution of processed batch sizes (readings per batch).</summary>
     public Histogram<int> BatchSize { get; }
+
+    /// <summary>
+    /// Counts readings discarded because their HMAC signature failed verification —
+    /// i.e. the frame was tampered with or corrupted in flight. A healthy pipeline keeps
+    /// this at (or very near) zero.
+    /// </summary>
+    public Counter<long> RejectedTampered { get; }
 
     public EngineMetrics()
     {
@@ -68,6 +76,11 @@ public sealed class EngineMetrics : IDisposable
             BatchSizeName,
             unit: "{reading}",
             description: "Number of readings in each processed batch.");
+
+        RejectedTampered = _meter.CreateCounter<long>(
+            RejectedTamperedName,
+            unit: "{reading}",
+            description: "Total readings rejected because their HMAC signature failed verification (tampered/corrupted).");
     }
 
     /// <summary>

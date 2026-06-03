@@ -52,6 +52,7 @@ Console.WriteLine($"  Effective throughput    : {report.Processed / Math.Max(rep
 Console.WriteLine($"  Distinct sensors        : {report.DistinctSensors:N0}");
 Console.WriteLine($"  Sink flushes            : {report.Flushes:N0}");
 Console.WriteLine($"  Rows persisted to sink  : {report.RowsPersisted:N0}");
+Console.WriteLine($"  Tampered frames rejected: {metricsExporter.RejectedTamperedTotal:N0}");
 Console.WriteLine("=====================================================================");
 
 return 0;

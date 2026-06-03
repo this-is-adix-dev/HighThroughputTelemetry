@@ -40,6 +40,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private long _producedTotal;
     private long _consumedTotal;
     private long _batchesTotal;
+    private long _rejectedTotal;
 
     // Instrument identities captured in InstrumentPublished. `volatile` because they
     // are published on the thread that creates the meter and then read on the
@@ -48,8 +49,16 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
     private volatile Instrument? _producedInstrument;
     private volatile Instrument? _consumedInstrument;
     private volatile Instrument? _batchSizeInstrument;
+    private volatile Instrument? _rejectedInstrument;
 
     private Task? _reportingLoop;
+
+    /// <summary>
+    /// Cumulative number of frames the consumers rejected for a failed HMAC signature,
+    /// observed purely through the metrics pipeline. Surfaced so the final report can show
+    /// that tamper detection actually fired during the run.
+    /// </summary>
+    public long RejectedTamperedTotal => Interlocked.Read(ref _rejectedTotal);
 
     public ConsoleMetricsExporter(string? meterName = null, TimeSpan? reportInterval = null)
     {
@@ -98,6 +107,9 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
             case EngineMetrics.BatchSizeName:
                 _batchSizeInstrument = instrument;
                 break;
+            case EngineMetrics.RejectedTamperedName:
+                _rejectedInstrument = instrument;
+                break;
             default:
                 return; // an instrument we don't track — leave it unsubscribed.
         }
@@ -119,6 +131,8 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
             Interlocked.Add(ref _consumedTotal, measurement);
         else if (ReferenceEquals(instrument, _producedInstrument))
             Interlocked.Add(ref _producedTotal, measurement);
+        else if (ReferenceEquals(instrument, _rejectedInstrument))
+            Interlocked.Add(ref _rejectedTotal, measurement);
     }
 
     /// <summary>
@@ -156,6 +170,7 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
                 long consumed = Interlocked.Read(ref _consumedTotal);
                 long produced = Interlocked.Read(ref _producedTotal);
                 long batches = Interlocked.Read(ref _batchesTotal);
+                long rejected = Interlocked.Read(ref _rejectedTotal);
 
                 // Divide by the real interval so the "per sec" figure stays correct
                 // even if the reporting cadence is ever retuned.
@@ -171,7 +186,8 @@ public sealed class ConsoleMetricsExporter : IAsyncDisposable
                     $"Throughput: {consumedRate,8:N0} msg/sec | " +
                     $"Produced: {producedRate,8:N0} msg/sec | " +
                     $"Batches processed: {batches,6:N0} | " +
-                    $"Total: {consumed,11:N0}");
+                    $"Total: {consumed,11:N0} | " +
+                    $"Tampered: {rejected,5:N0}");
             }
         }
         catch (OperationCanceledException)

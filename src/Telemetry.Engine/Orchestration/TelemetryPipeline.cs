@@ -116,7 +116,7 @@ public sealed class TelemetryPipeline
                 // IngestBatch is where TelemetryParser and SensorStatistics run; its
                 // return value is the count of readings successfully parsed and folded
                 // in — exactly the "consumed" figure and this batch's processed size.
-                int ingested = aggregator.IngestBatch(batch.Span);
+                int ingested = aggregator.IngestBatch(batch.Span, metrics.RejectedTampered);
 
                 // Two tag-less recordings. Add(long)/Record(int) take the value by
                 // value, so there is no boxing and no tag array — zero heap traffic on

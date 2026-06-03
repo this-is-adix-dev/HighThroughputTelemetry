@@ -1,11 +1,11 @@
 using System.Buffers;
-using Telemetry.Engine.Domain;
+using Telemetry.Engine.Parsing;
 
 namespace Telemetry.Engine.Producer;
 
 /// <summary>
 /// A unit of work handed from the producer to a consumer: a pooled byte buffer
-/// holding <see cref="ReadingCount"/> back-to-back 16-byte frames.
+/// holding <see cref="ReadingCount"/> back-to-back 32-byte signed frames.
 ///
 /// Batching is the single most important throughput decision in the pipeline.
 /// Pushing one reading at a time through a <c>Channel</c> would pay the channel's
@@ -30,8 +30,8 @@ public readonly struct TelemetryBatch
         ReadingCount = readingCount;
     }
 
-    /// <summary>Total number of meaningful bytes (<see cref="ReadingCount"/> × 16).</summary>
-    public int ByteLength => ReadingCount * SensorReading.Size;
+    /// <summary>Total number of meaningful bytes (<see cref="ReadingCount"/> × 32).</summary>
+    public int ByteLength => ReadingCount * TelemetryCodec.FrameSize;
 
     /// <summary>A read-only view over exactly the populated region of the buffer.</summary>
     public ReadOnlySpan<byte> Span => Buffer.AsSpan(0, ByteLength);

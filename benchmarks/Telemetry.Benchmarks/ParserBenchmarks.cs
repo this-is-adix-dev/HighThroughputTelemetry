@@ -24,9 +24,9 @@ public class ParserBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // Build one fixed buffer of serialized frames shared by both benchmarks so
-        // they decode byte-for-byte identical input.
-        _buffer = new byte[ReadingCount * SensorReading.Size];
+        // Build one fixed buffer of fully signed 32-byte frames shared by both benchmarks
+        // so they decode byte-for-byte identical input.
+        _buffer = new byte[ReadingCount * TelemetryCodec.FrameSize];
         var random = new Random(1789);
 
         for (int i = 0; i < ReadingCount; i++)
@@ -36,7 +36,7 @@ public class ParserBenchmarks
                 TimestampTicks: DateTime.UtcNow.Ticks,
                 Value: 20f + (float)(random.NextDouble() * 60.0));
 
-            TelemetryCodec.Encode(in reading, _buffer.AsSpan(i * SensorReading.Size, SensorReading.Size));
+            TelemetryCodec.EncodeFrame(in reading, _buffer.AsSpan(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize));
         }
     }
 
@@ -53,7 +53,11 @@ public class ParserBenchmarks
         return sum;
     }
 
-    /// <summary>Optimized: a ref-struct cursor over spans — zero heap allocation.</summary>
+    /// <summary>
+    /// Optimized: a ref-struct cursor over spans — zero heap allocation. Note it does
+    /// strictly more work than the naive baseline, re-deriving and constant-time-checking
+    /// each frame's HMAC, yet still allocates nothing.
+    /// </summary>
     [Benchmark]
     public double ZeroAllocation_Span()
     {

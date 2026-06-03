@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Threading;
 using Telemetry.Engine.Domain;
 using Telemetry.Engine.Parsing;
@@ -47,12 +48,19 @@ public sealed class SensorAggregator
     }
 
     /// <summary>
-    /// Decode a whole batch with the zero-allocation <see cref="TelemetryParser"/>
-    /// and fold every frame in. This is the bridge between Module B and Module C.
+    /// Decode and integrity-check a whole batch with the zero-allocation
+    /// <see cref="TelemetryParser"/> and fold every authentic frame in. Frames whose HMAC
+    /// fails verification are dropped and counted via
+    /// <paramref name="rejectedTamperedCounter"/>. This is the bridge between Module B and
+    /// Module C.
     /// </summary>
-    public int IngestBatch(ReadOnlySpan<byte> batch)
+    public int IngestBatch(ReadOnlySpan<byte> batch, Counter<long>? rejectedTamperedCounter = null)
     {
-        var parser = new TelemetryParser(batch);
+        // The parser verifies each frame's HMAC as it goes and increments the supplied
+        // counter for any frame whose signature does not match, transparently skipping it.
+        // The count we return is therefore the number of *authentic* readings folded in —
+        // tampered frames never reach Update.
+        var parser = new TelemetryParser(batch, rejectedTamperedCounter);
         int ingested = 0;
 
         while (parser.TryReadNext(out SensorReading reading))

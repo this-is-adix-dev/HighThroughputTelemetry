@@ -110,7 +110,9 @@ public sealed class FirehoseGenerator
     /// </summary>
     private TelemetryBatch BuildBatch(Random random)
     {
-        int byteLength = _batchSize * SensorReading.Size;
+        // Each frame is now FrameSize (32) bytes — 16 of data plus a 16-byte signature —
+        // so the batch buffer is twice the width it was before signing was introduced.
+        int byteLength = _batchSize * TelemetryCodec.FrameSize;
         byte[] buffer = ArrayPool<byte>.Shared.Rent(byteLength);
         Span<byte> destination = buffer.AsSpan(0, byteLength);
 
@@ -124,13 +126,40 @@ public sealed class FirehoseGenerator
                 // A sine-ish + noise value so aggregated min/max/avg look alive.
                 Value: 20f + (float)(random.NextDouble() * 60.0));
 
-            // Stage the reading through an inline-array frame (zero heap allocation),
-            // then copy the 16 bytes into the batch buffer. This exercises the
-            // PayloadBuffer inline array on the real hot path.
-            PayloadBuffer frame = TelemetryCodec.Encode(in reading);
-            ((ReadOnlySpan<byte>)frame).CopyTo(destination.Slice(i * SensorReading.Size, SensorReading.Size));
+            // Encode the data and append its truncated HMAC straight into this frame's
+            // slot in the pooled buffer. EncodeFrame stages the data through the inline-
+            // array PayloadBuffer internally, so that zero-allocation primitive still runs
+            // on the real hot path; signing then adds the 16-byte signature in place.
+            Span<byte> frame = destination.Slice(i * TelemetryCodec.FrameSize, TelemetryCodec.FrameSize);
+            TelemetryCodec.EncodeFrame(in reading, frame);
+
+            // Integrity demo: with a small probability, flip one random bit in the frame
+            // AFTER it was signed — simulating an attacker (or line noise) tampering with
+            // the packet in flight. The signature no longer matches the data, so the
+            // consumer will detect and reject exactly these frames.
+            if (random.NextDouble() < TamperProbabilityPerFrame)
+                CorruptRandomBit(frame, random);
         }
 
         return new TelemetryBatch(buffer, _batchSize);
+    }
+
+    /// <summary>
+    /// Fraction of produced frames that get a single bit deliberately corrupted to
+    /// exercise the tamper-detection path. 0.1% keeps the stream overwhelmingly valid
+    /// while guaranteeing a steady trickle of rejections to observe.
+    /// </summary>
+    private const double TamperProbabilityPerFrame = 0.001;
+
+    /// <summary>
+    /// Flip a single random bit somewhere in the 32-byte frame. Because the HMAC was
+    /// computed over the pristine bytes, ANY one-bit change makes verification fail
+    /// downstream — which is precisely the integrity guarantee we are demonstrating.
+    /// </summary>
+    private static void CorruptRandomBit(Span<byte> frame, Random random)
+    {
+        int byteIndex = random.Next(frame.Length);
+        int bitMask = 1 << random.Next(8);
+        frame[byteIndex] ^= (byte)bitMask;
     }
 }

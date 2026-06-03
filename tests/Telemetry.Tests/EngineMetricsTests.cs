@@ -18,6 +18,7 @@ public class EngineMetricsTests
 
         long produced = 0;
         long consumed = 0;
+        long rejected = 0;
         int batchRecords = 0;
         int lastBatchValue = 0;
 
@@ -33,6 +34,7 @@ public class EngineMetricsTests
         {
             if (instrument.Name == EngineMetrics.ReadingsProducedName) produced += measurement;
             else if (instrument.Name == EngineMetrics.ReadingsConsumedName) consumed += measurement;
+            else if (instrument.Name == EngineMetrics.RejectedTamperedName) rejected += measurement;
         });
         listener.SetMeasurementEventCallback<int>((instrument, measurement, _, _) =>
         {
@@ -45,9 +47,11 @@ public class EngineMetricsTests
         metrics.ReadingsProduced.Add(1000);
         metrics.ReadingsConsumed.Add(750);
         metrics.BatchSize.Record(750);
+        metrics.RejectedTampered.Add(3);
 
         Assert.Equal(1000, produced);
         Assert.Equal(750, consumed);
+        Assert.Equal(3, rejected);
         Assert.Equal(1, batchRecords);
         Assert.Equal(750, lastBatchValue);
     }

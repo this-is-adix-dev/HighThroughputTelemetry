@@ -1,4 +1,5 @@
 using Telemetry.Engine.Domain;
+using Telemetry.Engine.Parsing;
 
 namespace Telemetry.Benchmarks;
 
@@ -30,9 +31,11 @@ public static class NaiveTelemetryParser
 
         for (int i = 0; i < readingCount; i++)
         {
-            int baseOffset = i * SensorReading.Size;
+            // Frames are now 32 bytes (16 data + 16 signature). The naive baseline reads
+            // only the data half; it strides by the full frame width to find each one.
+            int baseOffset = i * TelemetryCodec.FrameSize;
 
-            // Allocate a throwaway 16-byte array and copy the frame into it.
+            // Allocate a throwaway 16-byte array and copy the data section into it.
             var frame = new byte[SensorReading.Size];
             Array.Copy(buffer, baseOffset, frame, 0, SensorReading.Size);
 

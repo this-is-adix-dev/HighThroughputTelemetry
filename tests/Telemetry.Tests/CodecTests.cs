@@ -51,4 +51,72 @@ public class CodecTests
         byte[] tooShort = new byte[SensorReading.Size - 1];
         Assert.Throws<ArgumentException>(() => TelemetryCodec.Decode(tooShort));
     }
+
+    [Fact]
+    public void EncodeFrame_ProducesAVerifiableFrame_ThatDecodesToOriginal()
+    {
+        var reading = new SensorReading(SensorId: 5, TimestampTicks: 123_456_789L, Value: 2.71828f);
+
+        Span<byte> frame = stackalloc byte[TelemetryCodec.FrameSize];
+        TelemetryCodec.EncodeFrame(in reading, frame);
+
+        ReadOnlySpan<byte> data = frame[..SensorReading.Size];
+        ReadOnlySpan<byte> signature = frame[SensorReading.Size..];
+
+        Assert.True(TelemetryCodec.Verify(data, signature));
+        Assert.Equal(reading, TelemetryCodec.Decode(data));
+    }
+
+    [Fact]
+    public void Sign_Then_Verify_RoundTrips()
+    {
+        Span<byte> data = stackalloc byte[SensorReading.Size];
+        TelemetryCodec.Encode(new SensorReading(11, 22, 3.5f), data);
+
+        Span<byte> signature = stackalloc byte[TelemetryCodec.SignatureSize];
+        TelemetryCodec.Sign(data, signature);
+
+        Assert.True(TelemetryCodec.Verify(data, signature));
+    }
+
+    [Fact]
+    public void Sign_IsDeterministic_ForTheSameData()
+    {
+        Span<byte> data = stackalloc byte[SensorReading.Size];
+        TelemetryCodec.Encode(new SensorReading(1, 2, 3f), data);
+
+        Span<byte> a = stackalloc byte[TelemetryCodec.SignatureSize];
+        Span<byte> b = stackalloc byte[TelemetryCodec.SignatureSize];
+        TelemetryCodec.Sign(data, a);
+        TelemetryCodec.Sign(data, b);
+
+        Assert.True(a.SequenceEqual(b));
+    }
+
+    [Fact]
+    public void Verify_Fails_WhenDataIsTampered()
+    {
+        Span<byte> data = stackalloc byte[SensorReading.Size];
+        TelemetryCodec.Encode(new SensorReading(7, 8, 9f), data);
+
+        Span<byte> signature = stackalloc byte[TelemetryCodec.SignatureSize];
+        TelemetryCodec.Sign(data, signature);
+
+        // Flip one data bit after signing: verification must now fail.
+        data[0] ^= 0x01;
+        Assert.False(TelemetryCodec.Verify(data, signature));
+    }
+
+    [Fact]
+    public void Verify_Fails_WhenSignatureIsTampered()
+    {
+        Span<byte> data = stackalloc byte[SensorReading.Size];
+        TelemetryCodec.Encode(new SensorReading(7, 8, 9f), data);
+
+        Span<byte> signature = stackalloc byte[TelemetryCodec.SignatureSize];
+        TelemetryCodec.Sign(data, signature);
+
+        signature[^1] ^= 0x80;
+        Assert.False(TelemetryCodec.Verify(data, signature));
+    }
 }
